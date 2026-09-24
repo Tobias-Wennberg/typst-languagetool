@@ -5,8 +5,8 @@ use clap::{Parser, ValueEnum};
 
 use colored::Colorize;
 use lt_world::LtWorld;
-use notify::RecursiveMode;
-use notify_debouncer_mini::new_debouncer;
+use notify::event::{EventKind, ModifyKind};
+use notify::{RecursiveMode, Watcher};
 use typst::World;
 use typst_languagetool::{
 	BackendOptions, LanguageTool, LanguageToolBackend, LanguageToolOptions, Suggestion,
@@ -17,7 +17,8 @@ use std::{
 	fs::File,
 	ops::Not,
 	path::{Path, PathBuf},
-	time::Duration,
+	sync::mpsc::{channel, RecvTimeoutError},
+	time::{Duration, Instant},
 };
 
 #[cfg(not(any(feature = "bundle", feature = "jar", feature = "server")))]
@@ -189,30 +190,66 @@ async fn check(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Resu
 }
 
 async fn watch(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Result<()> {
-	let (tx, rx) = std::sync::mpsc::channel();
-	let mut watcher = new_debouncer(Duration::from_secs_f64(args.delay), tx)?;
+	let (tx, rx) = channel();
+	let mut watcher = notify::recommended_watcher(move |event| {
+		let _ = tx.send(event);
+	})?;
+	watcher.watch(world.root(), RecursiveMode::Recursive)?;
+
+	let delay = Duration::from_secs_f64(args.delay);
 	let mut cache = Cache::new();
-	watcher
-		.watcher()
-		.watch(world.root(), RecursiveMode::Recursive)?;
+	let mut pending = Vec::new();
+	let mut deadline: Option<Instant> = None;
 
-	for events in rx {
-		for event in events.unwrap() {
-			match event.path.extension() {
-				Some(ext) if ext == "typ" => {},
-				_ => continue,
-			}
+	loop {
+		let timeout = deadline
+			.map(|deadline| deadline.saturating_duration_since(Instant::now()))
+			.unwrap_or(Duration::from_secs(60));
 
-			handle_file(
-				&event.path,
-				&mut lt,
-				&args,
-				&world,
-				args.lt.chunk_size,
-				&mut cache,
-				false,
-			)
-			.await?;
+		match rx.recv_timeout(timeout) {
+			Ok(Ok(event)) => {
+				// Reading source files emits access and metadata events, which
+				// must not trigger another check.
+				if matches!(event.kind, EventKind::Access(_))
+					|| matches!(event.kind, EventKind::Modify(ModifyKind::Metadata(_)))
+				{
+					continue;
+				}
+
+				for path in event.paths {
+					if path.extension().is_some_and(|ext| ext == "typ")
+						&& path.is_file()
+						&& !pending.contains(&path)
+					{
+						pending.push(path);
+					}
+				}
+
+				if !pending.is_empty() {
+					deadline = Some(Instant::now() + delay);
+				}
+			},
+			Ok(Err(err)) => eprintln!("Watch error: {:?}", err),
+			Err(RecvTimeoutError::Timeout) => {
+				let paths = std::mem::take(&mut pending);
+				deadline = None;
+				for path in paths {
+					if !path.is_file() {
+						continue;
+					}
+					handle_file(
+						&path,
+						&mut lt,
+						&args,
+						&world,
+						args.lt.chunk_size,
+						&mut cache,
+						false,
+					)
+					.await?;
+				}
+			},
+			Err(RecvTimeoutError::Disconnected) => break,
 		}
 	}
 	Ok(())

@@ -20,7 +20,6 @@ server = ["typst-languagetool/server"]
 typst-languagetool.workspace = true
 
 notify.workspace = true
-notify-debouncer-mini.workspace = true
 clap.workspace = true
 annotate-snippets.workspace = true
 serde_json.workspace = true

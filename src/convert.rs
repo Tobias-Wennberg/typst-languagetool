@@ -7,7 +7,7 @@ use typst::{
 	World,
 	foundations::{Content, SequenceElem, StyleChain, StyledElem, Value},
 	math::EquationElem,
-	model::{CiteElem, FigureElem, HeadingElem, ParbreakElem, RefElem},
+	model::{CiteElem, FigureElem, HeadingElem, ParElem, ParbreakElem, RefElem},
 	syntax::{FileId, Source, Span, SyntaxKind},
 	text::{Lang, Region, SpaceElem, SmartQuoteElem, TextElem},
 };
@@ -231,16 +231,23 @@ impl Converter {
 		} else if let Some(space) = content.to_packed::<SpaceElem>() {
 			self.maybe_add_text(SPACE, space.span());
 		} else if let Some(smartquote) = content.to_packed::<SmartQuoteElem>() {
-            if smartquote.double.get(style) {
-                self.add_text(DOUBLE_QUOTE, smartquote.span());
-            } else {
-                self.add_text(QUOTE, smartquote.span());
-            }
-        } else if let Some(parbreak) = content.to_packed::<ParbreakElem>() {
+			if smartquote.double.get(style) {
+				self.add_text(DOUBLE_QUOTE, smartquote.span());
+			} else {
+				self.add_text(QUOTE, smartquote.span());
+			}
+		} else if let Some(parbreak) = content.to_packed::<ParbreakElem>() {
 			if self.text.len() > self.chunk_size {
 				self.break_chunk();
 			} else {
 				self.maybe_add_text(BREAK, parbreak.span());
+			}
+		} else if let Some(paragraph) = content.to_packed::<ParElem>() {
+			self.iter_content(&paragraph.body, style);
+			if self.text.len() > self.chunk_size {
+				self.break_chunk();
+			} else {
+				self.maybe_add_text(BREAK, paragraph.span());
 			}
 		} else if let Some(figure) = content.to_packed::<FigureElem>() {
 			if let Some(caption) = figure.caption.get_ref(style) {

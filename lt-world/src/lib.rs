@@ -7,11 +7,14 @@ use std::{
 use typst::{
 	Library, LibraryExt, World,
 	diag::{FileError, FileResult, SourceResult},
-	engine::{Route, Sink, Traced},
-	foundations::{Content, Duration},
+	engine::{Engine, Route, Sink, Traced},
+	foundations::{Content, Duration, NativeRuleMap, StyleChain, Target, TargetElem},
+	introspection::{EmptyIntrospector, Introspector, Locator},
+	model::DocumentInfo,
+	routines::{Arenas, RealizationKind},
 	syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot},
 	text::Font,
-	utils::LazyHash,
+	utils::{LazyHash, Protected},
 };
 use typst_kit::{
 	datetime::Time, downloader::SystemDownloader, files::FsRoot, fonts::FontStore,
@@ -20,6 +23,7 @@ use typst_kit::{
 
 pub struct LtWorld {
 	library: LazyHash<Library>,
+	realize_library: LazyHash<Library>,
 	now: Time,
 
 	packages: SystemPackages,
@@ -42,8 +46,17 @@ impl LtWorld {
 		fonts.extend(typst_kit::fonts::embedded());
 		fonts.extend(typst_kit::fonts::system());
 
+		// Realization without layout rules, so that elements like equations
+		// and smart quotes stay in the form the converter understands.
+		let realize_library = {
+			let mut library = Library::builder().build();
+			library.rules = NativeRuleMap::new();
+			LazyHash::new(library)
+		};
+
 		Self {
 			library: LazyHash::new(Library::builder().build()),
+			realize_library,
 			now: Time::system(),
 
 			packages: SystemPackages::new(SystemDownloader::new("typst-languagetool")),
@@ -108,7 +121,7 @@ impl Deref for LtWorldRunning<'_> {
 
 impl LtWorldRunning<'_> {
 	pub fn compile(&self) -> SourceResult<Content> {
-		use typst::comemo::Track;
+		use typst::comemo::{Constraint, Track};
 
 		let mut sink = Sink::new();
 		let world = (self as &dyn World).track();
@@ -125,6 +138,43 @@ impl LtWorldRunning<'_> {
 			&main,
 		)?
 		.content();
+
+		// Realize the content to apply show rules and expand `context`
+		// expressions, which evaluation leaves opaque.
+		let empty_introspector = EmptyIntrospector;
+		let introspector: &dyn Introspector = &empty_introspector;
+		let constraint = Constraint::new();
+		let traced = Traced::default();
+		let mut engine = Engine {
+			library: &self.realize_library,
+			world,
+			introspector: Protected::new(introspector.track_with(&constraint)),
+			traced: traced.track(),
+			sink: sink.track_mut(),
+			route: Route::default(),
+		};
+
+		let base = StyleChain::new(&self.realize_library.styles);
+		let target = TargetElem::target.set(Target::Paged).wrap();
+		let styles = base.chain(&target);
+
+		let mut locator = Locator::root().split();
+		let arenas = Arenas::default();
+		let mut info = DocumentInfo::default();
+		let children = (self.realize_library.routines.realize)(
+			RealizationKind::Document { info: &mut info },
+			&mut engine,
+			&mut locator,
+			&arenas,
+			&content,
+			styles,
+		)?;
+
+		let content = Content::sequence(
+			children
+				.into_iter()
+				.map(|(content, styles)| content.clone().styled_with_map(styles.to_map())),
+		);
 
 		Ok(content)
 	}
