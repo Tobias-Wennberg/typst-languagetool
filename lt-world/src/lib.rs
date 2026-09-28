@@ -11,10 +11,13 @@ use typst::{
 	foundations::{Content, Duration, NativeRuleMap, Packed, StyleChain, Target, TargetElem},
 	introspection::{EmptyIntrospector, Introspector, Locator},
 	math::EquationElem,
-	model::{CiteElem, DocumentInfo, RefElem},
+	model::{CiteElem, DocumentInfo, EmphElem, LinkElem, QuoteElem, RefElem, StrongElem},
 	routines::{Arenas, RealizationKind},
 	syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot},
-	text::{Font, TextElem},
+	text::{
+		Font, HighlightElem, OverlineElem, SmallcapsElem, StrikeElem, SubElem, SuperElem,
+		TextElem, UnderlineElem,
+	},
 	utils::{LazyHash, Protected},
 };
 use typst_kit::{
@@ -43,6 +46,43 @@ fn equation_rule(
 	_: StyleChain,
 ) -> SourceResult<Content> {
 	Ok(TextElem::packed("0").spanned(elem.span()))
+}
+
+/// Defines rules that replace an inline wrapper with its body, and a function
+/// that registers all of them.
+macro_rules! body_rules {
+	($($name:ident: $elem:ty),* $(,)?) => {
+		$(
+			fn $name(
+				elem: &Packed<$elem>,
+				_: &mut Engine,
+				_: StyleChain,
+			) -> SourceResult<Content> {
+				Ok(Content::sequence([elem.body.clone()]))
+			}
+		)*
+
+		fn register_body_rules(rules: &mut NativeRuleMap) {
+			$(rules.register(Target::Paged, $name);)*
+		}
+	};
+}
+
+// Without these rules, the elements interrupt paragraph grouping during
+// realization, splitting the surrounding text into separate paragraphs and
+// adding a space after the body.
+body_rules! {
+	strong_rule: StrongElem,
+	emph_rule: EmphElem,
+	link_rule: LinkElem,
+	quote_rule: QuoteElem,
+	underline_rule: UnderlineElem,
+	overline_rule: OverlineElem,
+	strike_rule: StrikeElem,
+	highlight_rule: HighlightElem,
+	sub_rule: SubElem,
+	super_rule: SuperElem,
+	smallcaps_rule: SmallcapsElem,
 }
 
 pub struct LtWorld {
@@ -79,6 +119,7 @@ impl LtWorld {
 			library.rules.register(Target::Paged, reference_rule);
 			library.rules.register(Target::Paged, citation_rule);
 			library.rules.register(Target::Paged, equation_rule);
+			register_body_rules(&mut library.rules);
 			LazyHash::new(library)
 		};
 

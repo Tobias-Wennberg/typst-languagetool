@@ -366,6 +366,19 @@ mod tests {
 	}
 
 	#[test]
+	fn test_inline_wrapper_keeps_paragraph() {
+		let world = lt_world::LtWorld::new("example".into());
+		let harness = TestHarness::new(&world, Path::new("example/inline.typ"));
+
+		assert_eq!(
+			harness.text.matches("Utökad Testlicensen.").count(),
+			1,
+			"an inline wrapper must not split the paragraph or add a space: {:?}",
+			harness.text
+		);
+	}
+
+	#[test]
 	fn test_heading_not_glued_to_following_text() {
 		let world = lt_world::LtWorld::new("example".into());
 		let harness = TestHarness::new(&world, Path::new("example/heading.typ"));
