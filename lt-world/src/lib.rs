@@ -10,9 +10,16 @@ use typst::{
 	engine::{Engine, Route, Sink, Traced},
 	foundations::{Content, Duration, NativeRuleMap, Packed, StyleChain, Target, TargetElem},
 	introspection::{EmptyIntrospector, Introspector, Locator},
+	layout::{
+		AlignElem, BlockBody, BlockElem, BoxElem, ColumnsElem, GridCell, GridChild, GridElem,
+		GridItem, HideElem, MoveElem, PadElem, PlaceElem, RepeatElem, RotateElem, ScaleElem,
+		SkewElem, StackChild, StackElem,
+	},
 	math::EquationElem,
 	model::{
-		CiteElem, DocumentInfo, EmphElem, FootnoteElem, LinkElem, QuoteElem, RefElem, StrongElem,
+		CiteElem, DocumentInfo, EmphElem, EnumElem, FigureCaption, FigureElem, FootnoteElem,
+		LinkElem, ListElem, ParbreakElem, QuoteElem, RefElem, StrongElem, TableCell, TableChild,
+		TableElem, TableItem, TermsElem, TitleElem,
 	},
 	routines::{Arenas, RealizationKind},
 	syntax::{FileId, RootedPath, Source, Span, VirtualPath, VirtualRoot},
@@ -66,6 +73,17 @@ fn raw_rule(elem: &Packed<RawElem>, _: &mut Engine, _: StyleChain) -> SourceResu
 	Ok(TextElem::packed(RAW_PLACEHOLDER).spanned(elem.span()))
 }
 
+/// Keeps the raw content when it should be spellchecked.
+///
+/// The lines are synthesized before rules run, so they are available at any
+/// nesting depth.
+fn raw_text_rule(elem: &Packed<RawElem>, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+	let lines = elem.lines.as_deref().unwrap_or_default();
+	Ok(Content::sequence(
+		lines.iter().map(|line| line.body.clone()),
+	))
+}
+
 /// Sentinels around a footnote body, recognized by the converter.
 ///
 /// The converter captures the text between them as a separate chunk so a
@@ -93,8 +111,34 @@ fn footnote_rule(
 	]))
 }
 
-/// Defines rules that replace an inline wrapper with its body, and a function
-/// that registers all of them.
+/// A paragraph break used to separate block-level content.
+///
+/// Paragraph breaks are consumed by the paragraph grouping and do not reach the
+/// converter, but they end the current paragraph so that the converter sees
+/// separate [`ParElem`](typst::model::ParElem)s.
+fn paragraph_break(span: Span) -> Content {
+	ParbreakElem::shared().clone().spanned(span)
+}
+
+/// Joins content with paragraph breaks in between.
+fn join_paragraphs(contents: impl IntoIterator<Item = Content>, span: Span) -> Content {
+	let mut children = Vec::new();
+	for content in contents {
+		if !children.is_empty() {
+			children.push(paragraph_break(span));
+		}
+		children.push(content);
+	}
+	Content::sequence(children)
+}
+
+/// Isolates block-level content from the surrounding paragraphs.
+fn block(content: Content, span: Span) -> Content {
+	Content::sequence([paragraph_break(span), content, paragraph_break(span)])
+}
+
+/// Defines rules that replace an element with its body, and a function that
+/// registers all of them.
 macro_rules! body_rules {
 	($($name:ident: $elem:ty),* $(,)?) => {
 		$(
@@ -113,9 +157,29 @@ macro_rules! body_rules {
 	};
 }
 
+/// Like [`body_rules!`], but isolates the body as a block.
+macro_rules! block_rules {
+	($($name:ident: $elem:ty),* $(,)?) => {
+		$(
+			fn $name(
+				elem: &Packed<$elem>,
+				_: &mut Engine,
+				_: StyleChain,
+			) -> SourceResult<Content> {
+				Ok(block(elem.body.clone(), elem.span()))
+			}
+		)*
+
+		fn register_block_rules(rules: &mut NativeRuleMap) {
+			$(rules.register(Target::Paged, $name);)*
+		}
+	};
+}
+
 // Without these rules, the elements interrupt paragraph grouping during
 // realization, splitting the surrounding text into separate paragraphs and
-// adding a space after the body.
+// adding a space after the body. They also make the wrappers available inside
+// containers that the converter does not descend into itself.
 body_rules! {
 	strong_rule: StrongElem,
 	emph_rule: EmphElem,
@@ -128,6 +192,170 @@ body_rules! {
 	sub_rule: SubElem,
 	super_rule: SuperElem,
 	smallcaps_rule: SmallcapsElem,
+	hide_rule: HideElem,
+	table_cell_rule: TableCell,
+	grid_cell_rule: GridCell,
+	figure_caption_rule: FigureCaption,
+}
+
+block_rules! {
+	pad_rule: PadElem,
+	align_rule: AlignElem,
+	columns_rule: ColumnsElem,
+	place_rule: PlaceElem,
+	repeat_rule: RepeatElem,
+	move_rule: MoveElem,
+	scale_rule: ScaleElem,
+	rotate_rule: RotateElem,
+	skew_rule: SkewElem,
+}
+
+/// See [`body_rules!`]. The body is optional and the box is inline.
+fn box_rule(elem: &Packed<BoxElem>, _: &mut Engine, styles: StyleChain) -> SourceResult<Content> {
+	Ok(elem.body.get_cloned(styles).unwrap_or_default())
+}
+
+/// See [`block_rules!`]. Layout callbacks are ignored, they only exist after
+/// layout.
+fn block_rule(
+	elem: &Packed<BlockElem>,
+	_: &mut Engine,
+	styles: StyleChain,
+) -> SourceResult<Content> {
+	let body = match elem.body.get_ref(styles) {
+		Some(BlockBody::Content(body)) => body.clone(),
+		_ => Content::empty(),
+	};
+	Ok(block(body, elem.span()))
+}
+
+/// See [`block_rules!`]. An automatic title resolves to nothing because the
+/// document fields are not available here.
+fn title_rule(
+	elem: &Packed<TitleElem>,
+	_: &mut Engine,
+	styles: StyleChain,
+) -> SourceResult<Content> {
+	Ok(block(
+		elem.resolve_body(styles).unwrap_or_default(),
+		elem.span(),
+	))
+}
+
+/// Realizes the items of a bullet list as separate paragraphs.
+///
+/// The items are flattened here instead of being returned as elements: the
+/// list grouping only builds the [`ListElem`] if the items are not replaced by
+/// a show rule first.
+fn list_rule(elem: &Packed<ListElem>, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+	let span = elem.span();
+	let items = elem.children.iter().map(|item| item.body.clone());
+	Ok(block(join_paragraphs(items, span), span))
+}
+
+/// Realizes the items of an enumeration as separate paragraphs.
+///
+/// See [`list_rule`] for why the items are flattened.
+fn enum_rule(elem: &Packed<EnumElem>, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+	let span = elem.span();
+	let items = elem.children.iter().map(|item| item.body.clone());
+	Ok(block(join_paragraphs(items, span), span))
+}
+
+/// Realizes a term and its description as one paragraph per item.
+fn terms_rule(
+	elem: &Packed<TermsElem>,
+	_: &mut Engine,
+	styles: StyleChain,
+) -> SourceResult<Content> {
+	let span = elem.span();
+	let separator = elem.separator.get_ref(styles);
+	let items = elem.children.iter().map(|item| {
+		Content::sequence([
+			item.term.clone(),
+			separator.clone(),
+			item.description.clone(),
+		])
+	});
+	Ok(block(join_paragraphs(items, span), span))
+}
+
+/// Realizes the caption before the body, skipping numbering and supplement.
+fn figure_rule(
+	elem: &Packed<FigureElem>,
+	_: &mut Engine,
+	styles: StyleChain,
+) -> SourceResult<Content> {
+	let span = elem.span();
+	let mut children = Vec::new();
+	if let Some(caption) = elem.caption.get_ref(styles) {
+		children.push(caption.pack_ref().clone());
+	}
+	let body = elem.body.clone();
+	if !body.is_empty() {
+		children.push(body);
+	}
+	Ok(block(join_paragraphs(children, span), span))
+}
+
+/// Realizes every table cell as its own paragraph, skipping lines.
+fn table_rule(elem: &Packed<TableElem>, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+	let span = elem.span();
+	let mut cells = Vec::new();
+	for child in &elem.children {
+		match child {
+			TableChild::Header(header) => {
+				cells.extend(header.children.iter().filter_map(table_item));
+			},
+			TableChild::Footer(footer) => {
+				cells.extend(footer.children.iter().filter_map(table_item));
+			},
+			TableChild::Item(item) => cells.extend(table_item(item)),
+		}
+	}
+	Ok(block(join_paragraphs(cells, span), span))
+}
+
+fn table_item(item: &TableItem) -> Option<Content> {
+	match item {
+		TableItem::Cell(cell) => Some(cell.pack_ref().clone()),
+		_ => None,
+	}
+}
+
+/// Realizes every grid cell as its own paragraph, skipping lines.
+fn grid_rule(elem: &Packed<GridElem>, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+	let span = elem.span();
+	let mut cells = Vec::new();
+	for child in &elem.children {
+		match child {
+			GridChild::Header(header) => {
+				cells.extend(header.children.iter().filter_map(grid_item));
+			},
+			GridChild::Footer(footer) => {
+				cells.extend(footer.children.iter().filter_map(grid_item));
+			},
+			GridChild::Item(item) => cells.extend(grid_item(item)),
+		}
+	}
+	Ok(block(join_paragraphs(cells, span), span))
+}
+
+fn grid_item(item: &GridItem) -> Option<Content> {
+	match item {
+		GridItem::Cell(cell) => Some(cell.pack_ref().clone()),
+		_ => None,
+	}
+}
+
+/// Realizes every stack child as its own paragraph, skipping spacing.
+fn stack_rule(elem: &Packed<StackElem>, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+	let span = elem.span();
+	let children = elem.children.iter().filter_map(|child| match child {
+		StackChild::Block(content) => Some(content.clone()),
+		StackChild::Spacing(_) => None,
+	});
+	Ok(block(join_paragraphs(children, span), span))
 }
 
 pub struct LtWorld {
@@ -140,8 +368,6 @@ pub struct LtWorld {
 
 	fonts: FontStore,
 	shadow_files: HashMap<FileId, Source>,
-
-	ignore_raw: bool,
 }
 
 pub struct LtWorldRunning<'a> {
@@ -159,7 +385,8 @@ impl LtWorld {
 
 		// Realization without layout rules, so that elements like equations
 		// and smart quotes stay in the form the converter understands, plus
-		// placeholder rules for the elements the converter maps to text.
+		// rules that realize the content of containers the converter does not
+		// descend into itself.
 		let realize_library = {
 			let mut library = Library::builder().build();
 			library.rules = NativeRuleMap::new();
@@ -169,8 +396,21 @@ impl LtWorld {
 			library.rules.register(Target::Paged, footnote_rule);
 			if ignore_raw {
 				library.rules.register(Target::Paged, raw_rule);
+			} else {
+				library.rules.register(Target::Paged, raw_text_rule);
 			}
+			library.rules.register(Target::Paged, box_rule);
+			library.rules.register(Target::Paged, block_rule);
+			library.rules.register(Target::Paged, title_rule);
+			library.rules.register(Target::Paged, list_rule);
+			library.rules.register(Target::Paged, enum_rule);
+			library.rules.register(Target::Paged, terms_rule);
+			library.rules.register(Target::Paged, figure_rule);
+			library.rules.register(Target::Paged, table_rule);
+			library.rules.register(Target::Paged, grid_rule);
+			library.rules.register(Target::Paged, stack_rule);
 			register_body_rules(&mut library.rules);
+			register_block_rules(&mut library.rules);
 			LazyHash::new(library)
 		};
 
@@ -184,17 +424,11 @@ impl LtWorld {
 			fonts,
 			root: FsRoot::new(root),
 			shadow_files: HashMap::new(),
-
-			ignore_raw,
 		}
 	}
 
 	pub fn root(&self) -> &Path {
 		self.root.path()
-	}
-
-	pub fn ignore_raw(&self) -> bool {
-		self.ignore_raw
 	}
 
 	pub fn file_id(&self, path: &Path) -> Option<FileId> {

@@ -329,7 +329,6 @@ async fn handle_file(
 		chunk_size,
 		file_id_opt,
 		args.default_language,
-		world.ignore_raw(),
 	);
 	let mut collector = typst_languagetool::FileCollector::new(file_id_opt, &world);
 	let mut next_cache = Cache::new();

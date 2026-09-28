@@ -5,18 +5,11 @@ use std::{
 
 use typst::{
 	World,
-	foundations::{Content, Packed, SequenceElem, StyleChain, StyledElem, Value},
+	foundations::{Content, SequenceElem, StyleChain, StyledElem, Value},
 	introspection::TagElem,
-	math::EquationElem,
-	model::{
-		CiteElem, EmphElem, FigureElem, HeadingElem, LinkElem, ParElem, ParbreakElem, QuoteElem,
-		RefElem, StrongElem,
-	},
+	model::{HeadingElem, ParElem},
 	syntax::{FileId, Source, Span, SyntaxKind},
-	text::{
-		HighlightElem, Lang, OverlineElem, RawContent, RawElem, Region, SmallcapsElem,
-		SmartQuoteElem, SpaceElem, StrikeElem, SubElem, SuperElem, TextElem, UnderlineElem,
-	},
+	text::{Lang, Region, SmartQuoteElem, SpaceElem, TextElem},
 };
 
 use crate::Suggestion;
@@ -55,39 +48,6 @@ fn should_ignore(
 		current = node.parent();
 	}
 	false
-}
-
-/// Inline wrappers that only carry styles and must not introduce spacing.
-///
-/// Realization strips these in the normal flow, but content nested in opaque
-/// containers (figure captions, table cells, ...) is not realized, so the
-/// converter has to unwrap them.
-fn inline_body(content: &Content) -> Option<&Content> {
-	macro_rules! body {
-		($($elem:ty),* $(,)?) => {
-			$(
-				if let Some(elem) = content.to_packed::<$elem>() {
-					return Some(&elem.body);
-				}
-			)*
-		};
-	}
-
-	body!(
-		EmphElem,
-		StrongElem,
-		LinkElem,
-		QuoteElem,
-		UnderlineElem,
-		OverlineElem,
-		StrikeElem,
-		HighlightElem,
-		SubElem,
-		SuperElem,
-		SmallcapsElem,
-	);
-
-	None
 }
 
 #[derive(Debug)]
@@ -177,7 +137,6 @@ pub fn content(
 	chunk_size: usize,
 	file_id: Option<FileId>,
 	default_language: Option<(Lang, Option<Region>)>,
-	ignore_raw: bool,
 ) -> Vec<(String, Mapping)> {
 	let (default_language, default_region) = default_language.unwrap_or((Lang::ENGLISH, None));
 	let mut converter = Converter {
@@ -195,7 +154,7 @@ pub fn content(
 		default_region,
 		separator_pending: false,
 		footnotes: Vec::new(),
-		ignore_raw,
+		language_set: false,
 	};
 	converter.iter_content(content, StyleChain::default());
 	converter.break_chunk();
@@ -215,20 +174,19 @@ struct Converter {
 	footnotes: Vec<Captured>,
 
 	prev: Vec<(String, Mapping)>,
-	ignore_raw: bool,
+	language_set: bool,
 }
 
 struct Captured {
 	text: String,
 	mapping: Mapping,
 	contains_file: bool,
+	language_set: bool,
 }
 
 // Text replacements
 const SPACE: &str = " ";
 const BREAK: &str = "\n\n";
-const EQUATION: &str = "0";
-const REFERENCE: &str = "X";
 const QUOTE: &str = "'";
 const DOUBLE_QUOTE: &str = "\"";
 // Digits keep LanguageTool from applying word rules to code adjacent to prose
@@ -247,6 +205,7 @@ impl Converter {
 		}
 		let text = std::mem::take(&mut self.text);
 		self.separator_pending = false;
+		self.language_set = true;
 		let mapping = Mapping {
 			chars: Vec::new(),
 			language: self.mapping.language,
@@ -294,16 +253,12 @@ impl Converter {
 		}
 	}
 
-	pub fn add_raw(&mut self, text: &str, span: Span) {
+	pub fn add_raw_placeholder(&mut self) {
 		if self.text.chars().next_back().is_some_and(char::is_alphanumeric) {
 			self.add_text(SPACE, Span::detached());
 		}
-		self.add_text(text, span);
+		self.add_text(RAW, Span::detached());
 		self.separator_pending = true;
-	}
-
-	pub fn add_raw_placeholder(&mut self) {
-		self.add_raw(RAW, Span::detached());
 	}
 
 	pub fn begin_footnote(&mut self) {
@@ -319,6 +274,7 @@ impl Converter {
 			text: std::mem::take(&mut self.text),
 			mapping: std::mem::replace(&mut self.mapping, mapping),
 			contains_file: std::mem::take(&mut self.contains_file),
+			language_set: std::mem::replace(&mut self.language_set, false),
 		});
 	}
 
@@ -328,40 +284,9 @@ impl Converter {
 			self.text = captured.text;
 			self.mapping = captured.mapping;
 			self.contains_file = captured.contains_file;
+			self.language_set = captured.language_set;
 		}
 		self.separator_pending = true;
-	}
-
-	pub fn iter_raw(&mut self, raw: &Packed<RawElem>, style: StyleChain) {
-		if self.ignore_raw {
-			self.add_raw_placeholder();
-			return;
-		}
-
-		let lines = raw.lines.as_deref().unwrap_or_default();
-		if lines.is_empty() {
-			let text = match &raw.text {
-				RawContent::Text(text) => text.clone(),
-				RawContent::Lines(lines) => {
-					let mut text = String::new();
-					for (i, (line, _)) in lines.iter().enumerate() {
-						if i > 0 {
-							text.push('\n');
-						}
-						text.push_str(line);
-					}
-					text.into()
-				},
-			};
-			self.add_raw(&text, raw.span());
-			return;
-		}
-
-		for line in lines {
-			self.iter_content(&line.body, style);
-			self.maybe_add_text(SPACE, line.span());
-		}
-		self.maybe_add_text(SPACE, raw.span());
 	}
 
 	pub fn iter_content(&mut self, content: &Content, style: StyleChain) {
@@ -398,11 +323,13 @@ impl Converter {
 			} else {
 				self.default_region
 			};
-			if self.mapping.language != lang || self.mapping.region != region {
+			if (self.mapping.language != lang || self.mapping.region != region) && self.language_set
+			{
 				self.break_chunk();
 			}
 			self.mapping.language = lang;
 			self.mapping.region = region;
+			self.language_set = true;
 			self.add_text(&text.text, text.span());
 		} else if let Some(heading) = content.to_packed::<HeadingElem>() {
 			let level = heading.resolve_level(style);
@@ -427,12 +354,6 @@ impl Converter {
 			} else {
 				self.add_text(QUOTE, smartquote.span());
 			}
-		} else if let Some(parbreak) = content.to_packed::<ParbreakElem>() {
-			if self.text.len() > self.chunk_size {
-				self.break_chunk();
-			} else {
-				self.maybe_add_text(BREAK, parbreak.span());
-			}
 		} else if let Some(paragraph) = content.to_packed::<ParElem>() {
 			self.iter_content(&paragraph.body, style);
 			if self.text.len() > self.chunk_size {
@@ -440,23 +361,8 @@ impl Converter {
 			} else {
 				self.maybe_add_text(BREAK, paragraph.span());
 			}
-		} else if let Some(figure) = content.to_packed::<FigureElem>() {
-			if let Some(caption) = figure.caption.get_ref(style) {
-				self.iter_content(&caption.body, style);
-			}
-			self.iter_content(&figure.body, style);
-		} else if let Some(equation) = content.to_packed::<EquationElem>() {
-			self.add_text(EQUATION, equation.span());
-		} else if let Some(cite) = content.to_packed::<RefElem>() {
-			self.add_text(REFERENCE, cite.span());
-		} else if let Some(cite) = content.to_packed::<CiteElem>() {
-			self.add_text(REFERENCE, cite.span());
 		} else if content.is::<TagElem>() {
 			// No text and no space for zero-width introspection tags.
-		} else if let Some(raw) = content.to_packed::<RawElem>() {
-			self.iter_raw(raw, style);
-		} else if let Some(body) = inline_body(content) {
-			self.iter_content(body, style);
 		} else {
 			for (_key, field) in content.fields() {
 				self.iter_value(&field, style);
@@ -516,7 +422,7 @@ mod tests {
 			let compiled = world.compile();
 			assert!(compiled.errors.is_empty(), "{:?}", compiled.errors);
 			let doc = compiled.content.unwrap();
-			let paragraphs = content(&doc, 1000, None, default_language, world.ignore_raw());
+			let paragraphs = content(&doc, 1000, None, default_language);
 			assert_eq!(paragraphs.len(), 1, "expected exactly one paragraph");
 			let (text, mapping) = paragraphs.into_iter().next().unwrap();
 			Self { world, text, mapping, ignore_emphasis }
@@ -689,7 +595,7 @@ mod tests {
 		let world = lt_world::LtWorld::new("example".into(), false);
 		let world = world.with_main(Path::new("example/raw.typ").to_path_buf()).unwrap();
 		let doc = world.compile().content.unwrap();
-		let text: String = content(&doc, 1000, None, None, world.ignore_raw())
+		let text: String = content(&doc, 1000, None, None)
 			.into_iter()
 			.map(|(text, _)| text)
 			.collect();
@@ -720,7 +626,7 @@ mod tests {
 		let harness = TestHarness::new(&world, Path::new("example/raw_list.typ"));
 
 		assert_eq!(
-			harness.text.matches("0 är 1. 0 är 3.").count(),
+			harness.text.matches("0 är 1.\n\n0 är 3.").count(),
 			1,
 			"raw in list items must become placeholders: {:?}",
 			harness.text
@@ -737,16 +643,91 @@ mod tests {
 		let world = lt_world::LtWorld::new("example".into(), false);
 		let world = world.with_main(Path::new("example/raw_list.typ").to_path_buf()).unwrap();
 		let doc = world.compile().content.unwrap();
-		let text: String = content(&doc, 1000, None, None, world.ignore_raw())
+		let text: String = content(&doc, 1000, None, None)
 			.into_iter()
 			.map(|(text, _)| text)
 			.collect();
 
 		assert_eq!(
-			text.matches("adam är 1. bertil är 3.").count(),
+			text.matches("adam är 1.\n\nbertil är 3.").count(),
 			1,
 			"raw in list items must be checked when ignore_raw is disabled: {:?}",
 			text
+		);
+	}
+
+	#[test]
+	fn test_footnote_in_list_is_checked_separately() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let world = world.with_main(Path::new("example/footnote_list.typ").to_path_buf()).unwrap();
+		let doc = world.compile().content.unwrap();
+		let paragraphs: Vec<String> = content(&doc, 1000, None, None)
+			.into_iter()
+			.map(|(text, _)| text)
+			.collect();
+
+		assert!(
+			paragraphs.iter().any(|text| text.trim() == "En punkt med fotnot."),
+			"the list item must not be split by the footnote: {:?}",
+			paragraphs
+		);
+		assert!(
+			paragraphs.iter().any(|text| text.trim() == "En fotnot."),
+			"the footnote body must be checked as its own chunk: {:?}",
+			paragraphs
+		);
+	}
+
+	#[test]
+	fn test_symbol_in_list_is_checked() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let harness = TestHarness::new(&world, Path::new("example/symbol_list.typ"));
+
+		assert_eq!(
+			harness.text.matches("En pil → här.").count(),
+			1,
+			"symbols in list items must be realized: {:?}",
+			harness.text
+		);
+	}
+
+	#[test]
+	fn test_table_cells_are_checked() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let harness = TestHarness::new(&world, Path::new("example/table.typ"));
+
+		assert_eq!(
+			harness.text.matches("0\n\nen analys\n\nmer text\n\n0").count(),
+			1,
+			"table cells must become separate paragraphs: {:?}",
+			harness.text
+		);
+		assert!(
+			!harness.text.contains("adam") && !harness.text.contains("bertil"),
+			"raw in table cells must not be spellchecked: {:?}",
+			harness.text
+		);
+	}
+
+	#[test]
+	fn test_language_change_splits_chunks() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let world = world.with_main(Path::new("example/main.typ").to_path_buf()).unwrap();
+		let doc = world.compile().content.unwrap();
+		let languages: Vec<String> = content(&doc, 1000, None, None)
+			.into_iter()
+			.map(|(_, mapping)| mapping.language())
+			.collect();
+
+		assert!(
+			languages.iter().any(|lang| lang == "de-DE"),
+			"German text must be checked as German: {:?}",
+			languages
+		);
+		assert!(
+			languages.iter().any(|lang| lang == "en-GB"),
+			"English text must be checked as English: {:?}",
+			languages
 		);
 	}
 
@@ -797,7 +778,7 @@ mod tests {
 		let world = lt_world::LtWorld::new("example".into(), true);
 		let world = world.with_main(Path::new("example/footnote.typ").to_path_buf()).unwrap();
 		let doc = world.compile().content.unwrap();
-		let paragraphs: Vec<String> = content(&doc, 1000, None, None, world.ignore_raw())
+		let paragraphs: Vec<String> = content(&doc, 1000, None, None)
 			.into_iter()
 			.map(|(text, _)| text)
 			.collect();
@@ -828,7 +809,7 @@ mod tests {
 			.with_main(Path::new("example/footnote_glued.typ").to_path_buf())
 			.unwrap();
 		let doc = world.compile().content.unwrap();
-		let paragraphs: Vec<String> = content(&doc, 1000, None, None, world.ignore_raw())
+		let paragraphs: Vec<String> = content(&doc, 1000, None, None)
 			.into_iter()
 			.map(|(text, _)| text)
 			.collect();
@@ -864,7 +845,7 @@ mod tests {
 		assert!(!delayed.errors.is_empty(), "a show rule error must be reported");
 
 		let doc = delayed.content.unwrap();
-		let text: String = content(&doc, 1000, None, None, world.ignore_raw())
+		let text: String = content(&doc, 1000, None, None)
 			.into_iter()
 			.map(|(text, _)| text)
 			.collect();
