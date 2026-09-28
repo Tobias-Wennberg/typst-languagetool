@@ -24,8 +24,8 @@ use typst::{
 	routines::{Arenas, RealizationKind},
 	syntax::{FileId, RootedPath, Source, Span, VirtualPath, VirtualRoot},
 	text::{
-		Font, HighlightElem, OverlineElem, RawElem, SmallcapsElem, StrikeElem, SubElem, SuperElem,
-		TextElem, UnderlineElem,
+		Font, HighlightElem, OverlineElem, RawElem, RawLine, SmallcapsElem, StrikeElem, SubElem,
+		SuperElem, TextElem, UnderlineElem,
 	},
 	utils::{LazyHash, Protected},
 };
@@ -82,6 +82,21 @@ fn raw_text_rule(elem: &Packed<RawElem>, _: &mut Engine, _: StyleChain) -> Sourc
 	Ok(Content::sequence(
 		lines.iter().map(|line| line.body.clone()),
 	))
+}
+
+/// See [`raw_rule`]. Raw show rules emit `raw.line` elements instead of the
+/// (guarded) `raw` element, so the lines need the same treatment.
+fn raw_line_rule(elem: &Packed<RawLine>, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+	Ok(TextElem::packed(RAW_PLACEHOLDER).spanned(elem.span()))
+}
+
+/// See [`raw_text_rule`].
+fn raw_text_line_rule(
+	elem: &Packed<RawLine>,
+	_: &mut Engine,
+	_: StyleChain,
+) -> SourceResult<Content> {
+	Ok(elem.body.clone())
 }
 
 /// Sentinels around a footnote body, recognized by the converter.
@@ -396,8 +411,10 @@ impl LtWorld {
 			library.rules.register(Target::Paged, footnote_rule);
 			if ignore_raw {
 				library.rules.register(Target::Paged, raw_rule);
+				library.rules.register(Target::Paged, raw_line_rule);
 			} else {
 				library.rules.register(Target::Paged, raw_text_rule);
+				library.rules.register(Target::Paged, raw_text_line_rule);
 			}
 			library.rules.register(Target::Paged, box_rule);
 			library.rules.register(Target::Paged, block_rule);

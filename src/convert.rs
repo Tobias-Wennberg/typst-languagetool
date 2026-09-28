@@ -657,6 +657,40 @@ mod tests {
 	}
 
 	#[test]
+	fn test_raw_line_in_show_rule_is_replaced_by_placeholder() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let harness = TestHarness::new(&world, Path::new("example/raw_styled.typ"));
+
+		assert!(
+			!harness.text.contains("feeelstavad") && !harness.text.contains("felstavat"),
+			"raw lines emitted by show rules must not be spellchecked: {:?}",
+			harness.text
+		);
+		assert!(
+			harness.text.contains('0'),
+			"raw lines must become placeholders: {:?}",
+			harness.text
+		);
+	}
+
+	#[test]
+	fn test_raw_line_in_show_rule_is_checked_when_not_ignored() {
+		let world = lt_world::LtWorld::new("example".into(), false);
+		let world = world.with_main(Path::new("example/raw_styled.typ").to_path_buf()).unwrap();
+		let doc = world.compile().content.unwrap();
+		let text: String = content(&doc, 1000, None, None)
+			.into_iter()
+			.map(|(text, _)| text)
+			.collect();
+
+		assert!(
+			text.contains("feeelstavad") && text.contains("felstavat"),
+			"raw lines must be checked when ignore_raw is disabled: {:?}",
+			text
+		);
+	}
+
+	#[test]
 	fn test_footnote_in_list_is_checked_separately() {
 		let world = lt_world::LtWorld::new("example".into(), true);
 		let world = world.with_main(Path::new("example/footnote_list.typ").to_path_buf()).unwrap();
@@ -667,7 +701,9 @@ mod tests {
 			.collect();
 
 		assert!(
-			paragraphs.iter().any(|text| text.trim() == "En punkt med fotnot."),
+			paragraphs
+				.iter()
+				.any(|text| text.trim() == "En punkt med fotnot."),
 			"the list item must not be split by the footnote: {:?}",
 			paragraphs
 		);
@@ -697,7 +733,10 @@ mod tests {
 		let harness = TestHarness::new(&world, Path::new("example/table.typ"));
 
 		assert_eq!(
-			harness.text.matches("0\n\nen analys\n\nmer text\n\n0").count(),
+			harness
+				.text
+				.matches("0\n\nen analys\n\nmer text\n\n0")
+				.count(),
 			1,
 			"table cells must become separate paragraphs: {:?}",
 			harness.text
