@@ -225,6 +225,11 @@ impl Converter {
 				self.break_chunk();
 			}
 			self.iter_content(&heading.body, style);
+			if self.text.len() > self.chunk_size {
+				self.break_chunk();
+			} else {
+				self.maybe_add_text(BREAK, heading.span());
+			}
 		} else if let Some(sequence) = content.to_packed::<SequenceElem>() {
 			for child in sequence.children.iter() {
 				self.iter_content(child, style);
@@ -356,6 +361,19 @@ mod tests {
 			harness.text.matches("I like X .").count(),
 			1,
 			"a space after a reference must be preserved: {:?}",
+			harness.text
+		);
+	}
+
+	#[test]
+	fn test_heading_not_glued_to_following_text() {
+		let world = lt_world::LtWorld::new("example".into());
+		let harness = TestHarness::new(&world, Path::new("example/heading.typ"));
+
+		assert_eq!(
+			harness.text.matches("Terminologi\n\nLIA").count(),
+			1,
+			"a heading must be separated from the following paragraph: {:?}",
 			harness.text
 		);
 	}
