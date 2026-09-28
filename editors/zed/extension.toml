@@ -1,0 +1,11 @@
+id = "typst-languagetool-lsp"
+name = "Typst LanguageTool"
+version = "0.1.0"
+schema_version = 1
+authors = ["Tobias P.L Wennberg"]
+description = "Spellcheck Typst documents with LanguageTool."
+repository = "https://github.com/antonWetzel/typst-languagetool"
+
+[language_servers.typst-languagetool]
+name = "Typst LanguageTool"
+languages = ["Typst"]

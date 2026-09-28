@@ -6,6 +6,7 @@ use std::{
 use typst::{
 	World,
 	foundations::{Content, SequenceElem, StyleChain, StyledElem, Value},
+	introspection::TagElem,
 	math::EquationElem,
 	model::{CiteElem, FigureElem, HeadingElem, ParElem, ParbreakElem, RefElem},
 	syntax::{FileId, Source, Span, SyntaxKind},
@@ -260,6 +261,8 @@ impl Converter {
 			self.add_text(REFERENCE, cite.span());
 		} else if let Some(cite) = content.to_packed::<CiteElem>() {
 			self.add_text(REFERENCE, cite.span());
+		} else if content.is::<TagElem>() {
+			// No text and no space for zero-width introspection tags.
 		} else {
 			for (_key, field) in content.fields() {
 				self.iter_value(&field, style);
@@ -336,6 +339,25 @@ mod tests {
 			self.locations_with_ignore(&suggestion, ignore_functions)
 				.is_empty()
 		}
+	}
+
+	#[test]
+	fn test_reference_keeps_surrounding_text_intact() {
+		let world = lt_world::LtWorld::new("example".into());
+		let harness = TestHarness::new(&world, Path::new("example/reference.typ"));
+
+		assert_eq!(
+			harness.text.matches("I like X.").count(),
+			1,
+			"a reference must not add a space before the period: {:?}",
+			harness.text
+		);
+		assert_eq!(
+			harness.text.matches("I like X .").count(),
+			1,
+			"a space after a reference must be preserved: {:?}",
+			harness.text
+		);
 	}
 
 	#[test]

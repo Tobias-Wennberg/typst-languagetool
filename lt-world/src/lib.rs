@@ -8,18 +8,42 @@ use typst::{
 	Library, LibraryExt, World,
 	diag::{FileError, FileResult, SourceResult},
 	engine::{Engine, Route, Sink, Traced},
-	foundations::{Content, Duration, NativeRuleMap, StyleChain, Target, TargetElem},
+	foundations::{Content, Duration, NativeRuleMap, Packed, StyleChain, Target, TargetElem},
 	introspection::{EmptyIntrospector, Introspector, Locator},
-	model::DocumentInfo,
+	math::EquationElem,
+	model::{CiteElem, DocumentInfo, RefElem},
 	routines::{Arenas, RealizationKind},
 	syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot},
-	text::Font,
+	text::{Font, TextElem},
 	utils::{LazyHash, Protected},
 };
 use typst_kit::{
 	datetime::Time, downloader::SystemDownloader, files::FsRoot, fonts::FontStore,
 	packages::SystemPackages,
 };
+
+/// Replaces a reference with a placeholder that the converter expects.
+///
+/// Keeping references as raw elements would interrupt paragraph grouping
+/// during realization, splitting the surrounding text into separate
+/// paragraphs and discarding adjacent spaces.
+fn reference_rule(elem: &Packed<RefElem>, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+	Ok(TextElem::packed("X").spanned(elem.span()))
+}
+
+/// See [`reference_rule`].
+fn citation_rule(elem: &Packed<CiteElem>, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+	Ok(TextElem::packed("X").spanned(elem.span()))
+}
+
+/// See [`reference_rule`].
+fn equation_rule(
+	elem: &Packed<EquationElem>,
+	_: &mut Engine,
+	_: StyleChain,
+) -> SourceResult<Content> {
+	Ok(TextElem::packed("0").spanned(elem.span()))
+}
 
 pub struct LtWorld {
 	library: LazyHash<Library>,
@@ -47,10 +71,14 @@ impl LtWorld {
 		fonts.extend(typst_kit::fonts::system());
 
 		// Realization without layout rules, so that elements like equations
-		// and smart quotes stay in the form the converter understands.
+		// and smart quotes stay in the form the converter understands, plus
+		// placeholder rules for the elements the converter maps to text.
 		let realize_library = {
 			let mut library = Library::builder().build();
 			library.rules = NativeRuleMap::new();
+			library.rules.register(Target::Paged, reference_rule);
+			library.rules.register(Target::Paged, citation_rule);
+			library.rules.register(Target::Paged, equation_rule);
 			LazyHash::new(library)
 		};
 

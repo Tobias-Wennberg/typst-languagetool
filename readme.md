@@ -81,6 +81,14 @@ Spellcheck typst files with LanguageTool.
     - create a `main.typst` file and include your typst files inside if needed
 	- hints should appear (if not use `set filetype=typst` to force the type)
 		- first check takes longer
+- zed
+	- install language server protocol (LSP)
+		- `cargo install --git=https://github.com/antonWetzel/typst-languagetool lsp --features=...`
+	- install the extension as a dev extension
+		- extensions -> `Install Dev Extension` -> `editors/zed`
+	- configure options (see below)
+	- hints should appear
+		- first check takes longer
 
 
 ## Options
@@ -137,4 +145,25 @@ options: Option<PathBuf>,
 on_change: Option<std::time::Duration>,
 /// Path to a JSON file to load common options
 options: Option<PathBuf>,
+```
+
+### For Zed
+
+Options are set in the Zed settings under `lsp.typst-languagetool.initialization_options`.
+`root` defaults to the worktree root, `main` defaults to the checked file.
+`on_change` is only used as initialization option and must be a humantime string.
+
+```json
+{
+  "lsp": {
+    "typst-languagetool": {
+      "initialization_options": {
+        "backend": "server",
+        "host": "http://localhost",
+        "port": 8081,
+        "on_change": "500ms"
+      }
+    }
+  }
+}
 ```
