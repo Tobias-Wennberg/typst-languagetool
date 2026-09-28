@@ -181,10 +181,13 @@ pub fn pretty(file: &str, source: &Source, diagnostic: Diagnostic) {
 	{
 		snippet = snippet.annotation(AnnotationKind::Context.span(start..end).label(replacement));
 	}
-	let message = Level::INFO
+	let mut message = Level::INFO
 		.primary_title(&diagnostic.rule_description)
 		.id(&diagnostic.rule_id)
 		.element(snippet);
+	if let Some(context) = &diagnostic.context {
+		message = message.element(Level::NOTE.message(format!("checked text: {context}")));
+	}
 
 	let renderer = Renderer::styled();
 	println!("{}", renderer.render(&[message]));

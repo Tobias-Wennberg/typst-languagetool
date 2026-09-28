@@ -344,6 +344,7 @@ async fn handle_file(
 			&world,
 			&suggestions,
 			&mapping,
+			&text,
 			&args.lt.ignore_functions,
 			args.ignore_emphasis,
 		);

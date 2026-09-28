@@ -132,6 +132,77 @@ impl Mapping {
 	}
 }
 
+const CONTEXT_MAX: usize = 200;
+
+pub(crate) fn utf16_to_byte(text: &str, offset: usize) -> Option<usize> {
+	let mut seen = 0;
+	for (byte, c) in text.char_indices() {
+		if seen == offset {
+			return Some(byte);
+		}
+		seen += c.len_utf16();
+		if seen > offset {
+			return None;
+		}
+	}
+	(seen == offset).then_some(text.len())
+}
+
+fn floor_char_boundary(text: &str, mut byte: usize) -> usize {
+	while byte > 0 && !text.is_char_boundary(byte) {
+		byte -= 1;
+	}
+	byte
+}
+
+fn ceil_char_boundary(text: &str, mut byte: usize) -> usize {
+	while byte < text.len() && !text.is_char_boundary(byte) {
+		byte += 1;
+	}
+	byte
+}
+
+pub(crate) fn context_excerpt(text: &str, start: usize, end: usize) -> Option<String> {
+	let start_byte = utf16_to_byte(text, start)?;
+	let end_byte = utf16_to_byte(text, end)?;
+	if start_byte > end_byte {
+		return None;
+	}
+
+	let sentence_start = text[..start_byte]
+		.char_indices()
+		.rev()
+		.find(|(_, c)| matches!(c, '.' | '!' | '?' | '\n'))
+		.map_or(0, |(byte, c)| byte + c.len_utf8());
+	let sentence_end = text[end_byte..]
+		.char_indices()
+		.find(|(_, c)| matches!(c, '.' | '!' | '?' | '\n'))
+		.map_or(text.len(), |(byte, c)| end_byte + byte + c.len_utf8());
+
+	let (excerpt_start, excerpt_end) = if sentence_end - sentence_start > CONTEXT_MAX {
+		let center = (start_byte + end_byte) / 2;
+		let start = ceil_char_boundary(
+			text,
+			center.saturating_sub(CONTEXT_MAX / 2).max(sentence_start),
+		);
+		let end = floor_char_boundary(text, (start + CONTEXT_MAX).min(sentence_end));
+		(start, end.max(start))
+	} else {
+		(sentence_start, sentence_end)
+	};
+
+	let mut excerpt = String::new();
+	if excerpt_start > sentence_start {
+		excerpt.push('…');
+	}
+	excerpt.extend(text[excerpt_start..excerpt_end].chars());
+	if excerpt_end < sentence_end {
+		excerpt.push('…');
+	}
+
+	Some(excerpt.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
 pub fn content(
 	content: &Content,
 	chunk_size: usize,
@@ -927,5 +998,91 @@ mod tests {
 			"en-GB",
 			"the language set in the document must win over the default"
 		);
+	}
+
+	#[test]
+	fn test_utf16_to_byte() {
+		let text = "aä😀b";
+		assert_eq!(utf16_to_byte(text, 0), Some(0));
+		assert_eq!(utf16_to_byte(text, 1), Some(1));
+		assert_eq!(utf16_to_byte(text, 2), Some(3));
+		assert_eq!(utf16_to_byte(text, 3), None);
+		assert_eq!(utf16_to_byte(text, 4), Some(7));
+		assert_eq!(utf16_to_byte(text, 5), Some(8));
+		assert_eq!(utf16_to_byte(text, 6), None);
+	}
+
+	#[test]
+	fn test_context_excerpt_sentence() {
+		let text = "First sentence. This has a misspeled word in it. Third one.";
+		let start = text[..text.find("misspeled").unwrap()].encode_utf16().count();
+		let end = start + "misspeled".encode_utf16().count();
+		assert_eq!(
+			context_excerpt(text, start, end).as_deref(),
+			Some("This has a misspeled word in it.")
+		);
+	}
+
+	#[test]
+	fn test_context_excerpt_newline() {
+		let text = "Heading\nmisspeled word here\nTail";
+		let start = text[..text.find("misspeled").unwrap()].encode_utf16().count();
+		let end = start + "misspeled".encode_utf16().count();
+		assert_eq!(
+			context_excerpt(text, start, end).as_deref(),
+			Some("misspeled word here")
+		);
+	}
+
+	#[test]
+	fn test_context_excerpt_truncates() {
+		let padding = "word ".repeat(100);
+		let text = format!("{padding}misspeled{padding}");
+		let start = text[..text.find("misspeled").unwrap()].encode_utf16().count();
+		let end = start + "misspeled".encode_utf16().count();
+		let context = context_excerpt(&text, start, end).unwrap();
+		assert!(context.contains("misspeled"), "{context:?}");
+		assert!(context.starts_with('…') && context.ends_with('…'), "{context:?}");
+	}
+
+	#[test]
+	fn test_context_excerpt_invalid_offsets() {
+		assert_eq!(context_excerpt("abc", 1, 5), None);
+		assert_eq!(context_excerpt("😀", 1, 2), None);
+	}
+
+	fn add_diagnostic(harness: &TestHarness, needle: &str) -> Vec<crate::Diagnostic> {
+		let suggestion = harness.suggestion_for(needle);
+		let mut collector = crate::FileCollector::new(None, &harness.world);
+		collector.add(
+			&harness.world,
+			&[suggestion],
+			&harness.mapping,
+			&harness.text,
+			&HashSet::new(),
+			false,
+		);
+		collector.finish()
+	}
+
+	#[test]
+	fn test_context_absent_for_source_text() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let harness = TestHarness::new(&world, Path::new("example/inline.typ"));
+
+		let diagnostics = add_diagnostic(&harness, "Testlicensen");
+		assert_eq!(diagnostics.len(), 1);
+		assert!(diagnostics[0].context.is_none(), "{:?}", diagnostics[0].context);
+	}
+
+	#[test]
+	fn test_context_for_eval_content() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let harness = TestHarness::new(&world, Path::new("example/eval.typ"));
+
+		let diagnostics = add_diagnostic(&harness, "felstavat");
+		assert_eq!(diagnostics.len(), 1);
+		let context = diagnostics[0].context.as_deref().unwrap();
+		assert!(context.contains("felstavat"), "{context:?}");
 	}
 }

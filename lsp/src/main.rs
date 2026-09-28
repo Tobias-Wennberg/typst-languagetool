@@ -499,6 +499,7 @@ impl State {
 				&world,
 				&suggestions,
 				&mapping,
+				&text,
 				&self.options.ignore_functions,
 				self.options.ignore_emphasis,
 			);
@@ -521,6 +522,11 @@ impl State {
 					.lines()
 					.byte_to_line_column(diagnostic.locations[0].1.end)
 					.unwrap();
+				let context = diagnostic
+					.context
+					.as_deref()
+					.map(|context| format!("\n\nText: {context}"))
+					.unwrap_or_default();
 
 				Diagnostic {
 					range: Range {
@@ -537,7 +543,7 @@ impl State {
 					code: Some(NumberOrString::String(diagnostic.rule_id)),
 					code_description: None,
 					source: None,
-					message: diagnostic.message,
+					message: format!("{}{context}", diagnostic.message),
 					related_information: None,
 					tags: None,
 					data: serde_json::to_value(diagnostic.replacements).ok(),

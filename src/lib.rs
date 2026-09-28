@@ -9,7 +9,7 @@ use std::{
 
 #[allow(unused_imports)]
 pub use backends::*;
-use convert::Mapping;
+use convert::{Mapping, context_excerpt, utf16_to_byte};
 use typst::{
 	World,
 	syntax::{FileId, Source},
@@ -134,6 +134,7 @@ impl FileCollector {
 		world: &impl World,
 		suggestions: &[Suggestion],
 		mapping: &Mapping,
+		text: &str,
 		ignore_functions: &HashSet<String>,
 		ignore_emphasis: bool,
 	) {
@@ -148,12 +149,14 @@ impl FileCollector {
 			if locations.is_empty() {
 				return None;
 			}
+			let context = dynamic_context(world, suggestion, text, &locations);
 			let dia = Diagnostic {
 				locations,
 				message: suggestion.message.clone(),
 				replacements: suggestion.replacements.clone(),
 				rule_description: suggestion.rule_description.clone(),
 				rule_id: suggestion.rule_id.clone(),
+				context,
 			};
 			Some(dia)
 		});
@@ -165,6 +168,27 @@ impl FileCollector {
 	}
 }
 
+fn dynamic_context(
+	world: &impl World,
+	suggestion: &Suggestion,
+	text: &str,
+	locations: &[(FileId, Range<usize>)],
+) -> Option<String> {
+	let start = utf16_to_byte(text, suggestion.start)?;
+	let end = utf16_to_byte(text, suggestion.end)?;
+	let word = text.get(start..end)?;
+	let present = locations.iter().any(|(id, range)| {
+		let Ok(source) = world.source(*id) else {
+			return false;
+		};
+		source.text().get(range.clone()).is_some_and(|src| src.contains(word))
+	});
+	if present {
+		return None;
+	}
+	context_excerpt(text, suggestion.start, suggestion.end)
+}
+
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
 	pub locations: Vec<(FileId, Range<usize>)>,
@@ -172,6 +196,7 @@ pub struct Diagnostic {
 	pub replacements: Vec<String>,
 	pub rule_description: String,
 	pub rule_id: String,
+	pub context: Option<String>,
 }
 
 #[derive(Debug, Clone)]
