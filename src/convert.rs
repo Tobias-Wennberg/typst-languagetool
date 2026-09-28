@@ -8,9 +8,15 @@ use typst::{
 	foundations::{Content, SequenceElem, StyleChain, StyledElem, Value},
 	introspection::TagElem,
 	math::EquationElem,
-	model::{CiteElem, FigureElem, HeadingElem, ParElem, ParbreakElem, RefElem},
+	model::{
+		CiteElem, EmphElem, FigureElem, HeadingElem, LinkElem, ParElem, ParbreakElem, QuoteElem,
+		RefElem, StrongElem,
+	},
 	syntax::{FileId, Source, Span, SyntaxKind},
-	text::{Lang, Region, SpaceElem, SmartQuoteElem, TextElem},
+	text::{
+		HighlightElem, Lang, OverlineElem, Region, SmallcapsElem, SmartQuoteElem, SpaceElem,
+		StrikeElem, SubElem, SuperElem, TextElem, UnderlineElem,
+	},
 };
 
 use crate::Suggestion;
@@ -49,6 +55,39 @@ fn should_ignore(
 		current = node.parent();
 	}
 	false
+}
+
+/// Inline wrappers that only carry styles and must not introduce spacing.
+///
+/// Realization strips these in the normal flow, but content nested in opaque
+/// containers (figure captions, table cells, ...) is not realized, so the
+/// converter has to unwrap them.
+fn inline_body(content: &Content) -> Option<&Content> {
+	macro_rules! body {
+		($($elem:ty),* $(,)?) => {
+			$(
+				if let Some(elem) = content.to_packed::<$elem>() {
+					return Some(&elem.body);
+				}
+			)*
+		};
+	}
+
+	body!(
+		EmphElem,
+		StrongElem,
+		LinkElem,
+		QuoteElem,
+		UnderlineElem,
+		OverlineElem,
+		StrikeElem,
+		HighlightElem,
+		SubElem,
+		SuperElem,
+		SmallcapsElem,
+	);
+
+	None
 }
 
 #[derive(Debug)]
@@ -375,6 +414,8 @@ impl Converter {
 			self.add_text(REFERENCE, cite.span());
 		} else if content.is::<TagElem>() {
 			// No text and no space for zero-width introspection tags.
+		} else if let Some(body) = inline_body(content) {
+			self.iter_content(body, style);
 		} else {
 			for (_key, field) in content.fields() {
 				self.iter_value(&field, style);
@@ -655,6 +696,19 @@ mod tests {
 		assert!(
 			ignored.is_ignored("certificates", &[]),
 			"#emph[..] must be ignored when ignore_emphasis is enabled"
+		);
+	}
+
+	#[test]
+	fn test_inline_wrappers_in_caption_do_not_insert_space() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let harness = TestHarness::new(&world, Path::new("example/emph_caption.typ"));
+
+		assert_eq!(
+			harness.text.matches("Modellen analys och viktig.").count(),
+			1,
+			"inline wrappers in a caption must not insert spaces: {:?}",
+			harness.text
 		);
 	}
 
