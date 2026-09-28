@@ -153,7 +153,8 @@ pub fn content(
 		prev: Vec::new(),
 		default_language,
 		default_region,
-		raw_pending: false,
+		separator_pending: false,
+		footnotes: Vec::new(),
 	};
 	converter.iter_content(content, StyleChain::default());
 	converter.break_chunk();
@@ -169,9 +170,16 @@ struct Converter {
 	default_language: Lang,
 	default_region: Option<Region>,
 
-	raw_pending: bool,
+	separator_pending: bool,
+	footnotes: Vec<Captured>,
 
 	prev: Vec<(String, Mapping)>,
+}
+
+struct Captured {
+	text: String,
+	mapping: Mapping,
+	contains_file: bool,
 }
 
 // Text replacements
@@ -184,9 +192,11 @@ const DOUBLE_QUOTE: &str = "\"";
 // Digits keep LanguageTool from applying word rules to code adjacent to prose
 // (e.g. `a 0` stays clean) and from treating the placeholder as a word.
 const RAW: &str = "0";
-// Marks a `TextElem` that replaced a raw element during realization. See
-// `raw_rule` in lt-world.
+// Mark `TextElem`s that replaced elements during realization. See the
+// `raw_rule` and `footnote_rule` in lt-world.
 const RAW_SENTINEL: &str = "\u{e000}";
+const FOOTNOTE_START: &str = "\u{e001}";
+const FOOTNOTE_END: &str = "\u{e002}";
 
 impl Converter {
 	pub fn break_chunk(&mut self) {
@@ -194,7 +204,7 @@ impl Converter {
 			return;
 		}
 		let text = std::mem::take(&mut self.text);
-		self.raw_pending = false;
+		self.separator_pending = false;
 		let mapping = Mapping {
 			chars: Vec::new(),
 			language: self.mapping.language,
@@ -217,9 +227,11 @@ impl Converter {
 	}
 
 	pub fn add_text(&mut self, text: &str, span: Span) {
-		if self.raw_pending {
-			self.raw_pending = false;
-			if text.chars().next().is_some_and(char::is_alphanumeric) {
+		if self.separator_pending {
+			self.separator_pending = false;
+			let ends_with_space =
+				self.text.chars().next_back().is_some_and(char::is_whitespace);
+			if !ends_with_space && text.chars().next().is_some_and(char::is_alphanumeric) {
 				self.add_text(SPACE, Span::detached());
 			}
 		}
@@ -245,7 +257,33 @@ impl Converter {
 			self.add_text(SPACE, Span::detached());
 		}
 		self.add_text(RAW, Span::detached());
-		self.raw_pending = true;
+		self.separator_pending = true;
+	}
+
+	pub fn begin_footnote(&mut self) {
+		if self.text.chars().next_back().is_some_and(char::is_alphanumeric) {
+			self.add_text(SPACE, Span::detached());
+		}
+		let mapping = Mapping {
+			chars: Vec::new(),
+			language: self.mapping.language,
+			region: self.mapping.region,
+		};
+		self.footnotes.push(Captured {
+			text: std::mem::take(&mut self.text),
+			mapping: std::mem::replace(&mut self.mapping, mapping),
+			contains_file: std::mem::take(&mut self.contains_file),
+		});
+	}
+
+	pub fn end_footnote(&mut self) {
+		self.break_chunk();
+		if let Some(captured) = self.footnotes.pop() {
+			self.text = captured.text;
+			self.mapping = captured.mapping;
+			self.contains_file = captured.contains_file;
+		}
+		self.separator_pending = true;
 	}
 
 	pub fn iter_content(&mut self, content: &Content, style: StyleChain) {
@@ -253,9 +291,20 @@ impl Converter {
 			let style = style.chain(&styled.styles);
 			self.iter_content(&styled.child, style);
 		} else if let Some(text) = content.to_packed::<TextElem>() {
-			if text.text.as_str() == RAW_SENTINEL {
-				self.add_raw_placeholder();
-				return;
+			match text.text.as_str() {
+				RAW_SENTINEL => {
+					self.add_raw_placeholder();
+					return;
+				},
+				FOOTNOTE_START => {
+					self.begin_footnote();
+					return;
+				},
+				FOOTNOTE_END => {
+					self.end_footnote();
+					return;
+				},
+				_ => {},
 			}
 			let has_lang = style.has(TextElem::lang);
 			let has_region = style.has(TextElem::region);
@@ -604,6 +653,60 @@ mod tests {
 		assert!(
 			ignored.is_ignored("certificates", &[]),
 			"#emph[..] must be ignored when ignore_emphasis is enabled"
+		);
+	}
+
+	#[test]
+	fn test_footnote_is_checked_separately() {
+		assert_eq!(FOOTNOTE_START, lt_world::FOOTNOTE_START);
+		assert_eq!(FOOTNOTE_END, lt_world::FOOTNOTE_END);
+
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let world = world.with_main(Path::new("example/footnote.typ").to_path_buf());
+		let doc = world.compile().unwrap();
+		let paragraphs: Vec<String> = content(&doc, 1000, None, None)
+			.into_iter()
+			.map(|(text, _)| text)
+			.collect();
+
+		assert!(
+			paragraphs
+				.iter()
+				.any(|text| text.contains("En mening med fotnot.")),
+			"the main text must not be split by the footnote: {:?}",
+			paragraphs
+		);
+		assert!(
+			paragraphs.iter().any(|text| text.trim() == "En fotnot."),
+			"the footnote body must be checked as its own chunk: {:?}",
+			paragraphs
+		);
+		assert!(
+			!paragraphs.iter().any(|text| text.contains("fotnot. med")),
+			"the footnote must not terminate the main sentence: {:?}",
+			paragraphs
+		);
+	}
+
+	#[test]
+	fn test_footnote_keeps_adjacent_words_apart() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let world = world.with_main(Path::new("example/footnote_glued.typ").to_path_buf());
+		let doc = world.compile().unwrap();
+		let paragraphs: Vec<String> = content(&doc, 1000, None, None)
+			.into_iter()
+			.map(|(text, _)| text)
+			.collect();
+
+		assert!(
+			paragraphs.iter().any(|text| text.contains("Before after")),
+			"words glued to the footnote must stay separate: {:?}",
+			paragraphs
+		);
+		assert!(
+			paragraphs.iter().any(|text| text.trim() == "Note text"),
+			"the footnote body must be checked as its own chunk: {:?}",
+			paragraphs
 		);
 	}
 

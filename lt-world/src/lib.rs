@@ -11,7 +11,9 @@ use typst::{
 	foundations::{Content, Duration, NativeRuleMap, Packed, StyleChain, Target, TargetElem},
 	introspection::{EmptyIntrospector, Introspector, Locator},
 	math::EquationElem,
-	model::{CiteElem, DocumentInfo, EmphElem, LinkElem, QuoteElem, RefElem, StrongElem},
+	model::{
+		CiteElem, DocumentInfo, EmphElem, FootnoteElem, LinkElem, QuoteElem, RefElem, StrongElem,
+	},
 	routines::{Arenas, RealizationKind},
 	syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot},
 	text::{
@@ -62,6 +64,33 @@ pub const RAW_PLACEHOLDER: &str = "\u{e000}";
 /// registered when raw content should not be spellchecked.
 fn raw_rule(elem: &Packed<RawElem>, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
 	Ok(TextElem::packed(RAW_PLACEHOLDER).spanned(elem.span()))
+}
+
+/// Sentinels around a footnote body, recognized by the converter.
+///
+/// The converter captures the text between them as a separate chunk so a
+/// footnote does not become part of the surrounding sentence.
+pub const FOOTNOTE_START: &str = "\u{e001}";
+/// See [`FOOTNOTE_START`].
+pub const FOOTNOTE_END: &str = "\u{e002}";
+
+/// Marks a footnote body with [`FOOTNOTE_START`] and [`FOOTNOTE_END`].
+///
+/// Like [`reference_rule`], this keeps paragraph grouping intact, which the
+/// missing footnote rule would otherwise interrupt.
+fn footnote_rule(
+	elem: &Packed<FootnoteElem>,
+	_: &mut Engine,
+	_: StyleChain,
+) -> SourceResult<Content> {
+	let Some(body) = elem.body_content() else {
+		return Ok(Content::empty());
+	};
+	Ok(Content::sequence([
+		TextElem::packed(FOOTNOTE_START).spanned(elem.span()),
+		body.clone(),
+		TextElem::packed(FOOTNOTE_END).spanned(elem.span()),
+	]))
 }
 
 /// Defines rules that replace an inline wrapper with its body, and a function
@@ -135,6 +164,7 @@ impl LtWorld {
 			library.rules.register(Target::Paged, reference_rule);
 			library.rules.register(Target::Paged, citation_rule);
 			library.rules.register(Target::Paged, equation_rule);
+			library.rules.register(Target::Paged, footnote_rule);
 			if ignore_raw {
 				library.rules.register(Target::Paged, raw_rule);
 			}
