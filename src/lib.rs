@@ -13,6 +13,7 @@ use convert::Mapping;
 use typst::{
 	World,
 	syntax::{FileId, Source},
+	text::{Lang, Region},
 };
 
 #[allow(async_fn_in_trait)]
@@ -198,6 +199,10 @@ pub struct LanguageToolOptions {
 	pub disabled_checks: HashMap<String, Vec<String>>,
 	/// Functions calls to ignore (lorem, bibliography, ...)
 	pub ignore_functions: HashSet<String>,
+
+	/// Language used for text without `#set text(lang: ...)`
+	/// (e.g. "sv" or "sv-SE")
+	pub default_language: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -234,6 +239,7 @@ impl Default for LanguageToolOptions {
 				.into_iter()
 				.map(String::from)
 				.collect(),
+			default_language: None,
 		}
 	}
 }
@@ -258,8 +264,31 @@ impl LanguageToolOptions {
 			dictionary: self.dictionary,
 			disabled_checks: self.disabled_checks,
 			ignore_functions: self.ignore_functions,
+			default_language: other.default_language.or(self.default_language),
 		}
 	}
+}
+
+/// Parse a language code like `sv` or `sv-SE` into a language and region.
+pub fn parse_language(code: &str) -> anyhow::Result<(Lang, Option<Region>)> {
+	let (lang, region) = match code.split_once('-') {
+		Some((lang, region)) => {
+			let lang = lang
+				.parse::<Lang>()
+				.map_err(|err| anyhow::anyhow!("invalid language '{lang}': {err}"))?;
+			let region = region
+				.parse::<Region>()
+				.map_err(|err| anyhow::anyhow!("invalid region '{region}': {err}"))?;
+			(lang, Some(region))
+		},
+		None => {
+			let lang = code
+				.parse::<Lang>()
+				.map_err(|err| anyhow::anyhow!("invalid language '{code}': {err}"))?;
+			(lang, None)
+		},
+	};
+	Ok((lang, region))
 }
 
 fn string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>

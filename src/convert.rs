@@ -125,18 +125,22 @@ pub fn content(
 	content: &Content,
 	chunk_size: usize,
 	file_id: Option<FileId>,
+	default_language: Option<(Lang, Option<Region>)>,
 ) -> Vec<(String, Mapping)> {
+	let (default_language, default_region) = default_language.unwrap_or((Lang::ENGLISH, None));
 	let mut converter = Converter {
 		text: String::new(),
 		mapping: Mapping {
 			chars: Vec::new(),
-			language: Lang::ENGLISH,
-			region: None,
+			language: default_language,
+			region: default_region,
 		},
 		chunk_size,
 		contains_file: false,
 		file_id,
 		prev: Vec::new(),
+		default_language,
+		default_region,
 	};
 	converter.iter_content(content, StyleChain::default());
 	converter.break_chunk();
@@ -149,6 +153,8 @@ struct Converter {
 	chunk_size: usize,
 	contains_file: bool,
 	file_id: Option<FileId>,
+	default_language: Lang,
+	default_region: Option<Region>,
 
 	prev: Vec<(String, Mapping)>,
 }
@@ -211,8 +217,20 @@ impl Converter {
 			let style = style.chain(&styled.styles);
 			self.iter_content(&styled.child, style);
 		} else if let Some(text) = content.to_packed::<TextElem>() {
-			let lang = style.get(TextElem::lang);
-			let region = style.get(TextElem::region);
+			let has_lang = style.has(TextElem::lang);
+			let has_region = style.has(TextElem::region);
+			let lang = if has_lang {
+				style.get(TextElem::lang)
+			} else {
+				self.default_language
+			};
+			let region = if has_region {
+				style.get(TextElem::region)
+			} else if has_lang {
+				None
+			} else {
+				self.default_region
+			};
 			if self.mapping.language != lang || self.mapping.region != region {
 				self.break_chunk();
 			}
@@ -305,9 +323,17 @@ mod tests {
 
 	impl<'a> TestHarness<'a> {
 		fn new(world: &'a lt_world::LtWorld, main_file: &Path) -> Self {
+			Self::new_with_language(world, main_file, None)
+		}
+
+		fn new_with_language(
+			world: &'a lt_world::LtWorld,
+			main_file: &Path,
+			default_language: Option<(Lang, Option<Region>)>,
+		) -> Self {
 			let world = world.with_main(main_file.to_path_buf());
 			let doc = world.compile().unwrap();
-			let paragraphs = content(&doc, 1000, None);
+			let paragraphs = content(&doc, 1000, None, default_language);
 			assert_eq!(paragraphs.len(), 1, "expected exactly one paragraph");
 			let (text, mapping) = paragraphs.into_iter().next().unwrap();
 			Self { world, text, mapping }
@@ -428,6 +454,40 @@ mod tests {
 		assert!(
 			!harness.is_ignored("anohter", &[]),
 			"content in #prog([]) should not be ignored when prog is not in ignore_functions"
+		);
+	}
+
+	#[test]
+	fn test_default_language_when_document_sets_none() {
+		let world = lt_world::LtWorld::new("example".into());
+		let default = crate::parse_language("sv-SE").unwrap();
+		let harness = TestHarness::new_with_language(
+			&world,
+			Path::new("example/reference.typ"),
+			Some(default),
+		);
+
+		assert_eq!(
+			harness.mapping.language(),
+			"sv-SE",
+			"default language must be used when the document does not set one"
+		);
+	}
+
+	#[test]
+	fn test_default_language_is_overridden_by_document() {
+		let world = lt_world::LtWorld::new("example".into());
+		let default = crate::parse_language("sv-SE").unwrap();
+		let harness = TestHarness::new_with_language(
+			&world,
+			Path::new("example/other.typ"),
+			Some(default),
+		);
+
+		assert_eq!(
+			harness.mapping.language(),
+			"en-GB",
+			"the language set in the document must win over the default"
 		);
 	}
 }

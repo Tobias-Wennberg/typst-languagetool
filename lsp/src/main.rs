@@ -10,7 +10,10 @@ use lsp_types::request::*;
 use lsp_types::*;
 use lt_world::LtWorld;
 use serde_json::Value;
-use typst::World;
+use typst::{
+	World,
+	text::{Lang, Region},
+};
 use typst_languagetool::{LanguageTool, LanguageToolBackend, LanguageToolOptions, Suggestion};
 
 #[cfg(not(any(feature = "bundle", feature = "jar", feature = "server")))]
@@ -45,6 +48,10 @@ impl InitOptions {
 		make_absolute(&cwd, &mut self.lt.main);
 		make_absolute(&cwd, &mut self.lt.root);
 	}
+}
+
+fn parse_default_language(code: Option<&str>) -> anyhow::Result<Option<(Lang, Option<Region>)>> {
+	code.map(typst_languagetool::parse_language).transpose()
 }
 
 #[tokio::main]
@@ -92,6 +99,7 @@ struct Options {
 	on_change: Option<std::time::Duration>,
 	main: Option<PathBuf>,
 	ignore_functions: HashSet<String>,
+	default_language: Option<(Lang, Option<Region>)>,
 }
 
 struct State {
@@ -139,6 +147,9 @@ impl State {
 
 		eprintln!("Compiling document");
 
+		let default_language = parse_default_language(options.lt.default_language.as_deref())
+			.context("Invalid `default_language` option")?;
+
 		Ok(Self {
 			world,
 			cache,
@@ -151,6 +162,7 @@ impl State {
 				chunk_size: options.lt.chunk_size,
 				main: options.lt.main,
 				ignore_functions: options.lt.ignore_functions,
+				default_language,
 			},
 		})
 	}
@@ -414,11 +426,21 @@ impl State {
 			self.world = LtWorld::new(root);
 		}
 
+		let default_language =
+			match parse_default_language(options.lt.default_language.as_deref()) {
+				Ok(lang) => lang,
+				Err(err) => {
+					eprintln!("{}", err);
+					return Ok(());
+				},
+			};
+
 		self.options = Options {
 			on_change: options.on_change,
 			chunk_size: options.lt.chunk_size,
 			main: options.lt.main,
 			ignore_functions: options.lt.ignore_functions,
+			default_language,
 		};
 
 		Ok(())
@@ -444,8 +466,12 @@ impl State {
 			return Ok(Vec::new());
 		};
 		eprintln!("Converting");
-		let paragraphs =
-			typst_languagetool::convert::content(&doc, self.options.chunk_size, Some(file_id));
+		let paragraphs = typst_languagetool::convert::content(
+			&doc,
+			self.options.chunk_size,
+			Some(file_id),
+			self.options.default_language,
+		);
 		let mut collector = typst_languagetool::FileCollector::new(Some(file_id), &world);
 		let mut next_cache = Cache::new();
 		let l = paragraphs.len();

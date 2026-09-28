@@ -100,6 +100,9 @@ dictionary: HashMap<String, Vec<String>>,
 disabled_checks: HashMap<String, Vec<String>>,
 /// Functions calls to ignore (lorem, bibliography, cite, ...)
 ignore_functions: HashSet<String>,
+/// Language (and optional region) for text without `#set text(lang: ...)`
+/// e.g. "sv" or "sv-SE"
+default_language: Option<String>,
 
 /// specify used backend
 backend: "bundle" | "jar" | "server",

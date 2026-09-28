@@ -7,7 +7,10 @@ use colored::Colorize;
 use lt_world::LtWorld;
 use notify::event::{EventKind, ModifyKind};
 use notify::{RecursiveMode, Watcher};
-use typst::World;
+use typst::{
+	World,
+	text::{Lang, Region},
+};
 use typst_languagetool::{
 	BackendOptions, LanguageTool, LanguageToolBackend, LanguageToolOptions, Suggestion,
 };
@@ -100,6 +103,7 @@ struct Args {
 	path: Option<PathBuf>,
 	delay: f64,
 	plain: bool,
+	default_language: Option<(Lang, Option<Region>)>,
 	lt: LanguageToolOptions,
 }
 
@@ -143,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
 		path: cli_args.path,
 		delay: cli_args.delay,
 		plain: cli_args.plain,
+		default_language: None,
 		lt: LanguageToolOptions {
 			root: cli_args.root,
 			main: cli_args.main,
@@ -158,7 +163,14 @@ async fn main() -> anyhow::Result<()> {
 		args.lt = file_options.overwrite(args.lt);
 	}
 
-	let args = args;
+	let default_language = args
+		.lt
+		.default_language
+		.as_deref()
+		.map(typst_languagetool::parse_language)
+		.transpose()
+		.context("Invalid `default_language` option")?;
+	let args = Args { default_language, ..args };
 
 	let lt = LanguageTool::new(&args.lt).await?;
 
@@ -283,7 +295,8 @@ async fn handle_file(
 	let file_id = world.file_id(path).unwrap();
 	let file_id_opt = include_all.not().then_some(file_id);
 
-	let paragraphs = typst_languagetool::convert::content(&doc, chunk_size, file_id_opt);
+	let paragraphs =
+		typst_languagetool::convert::content(&doc, chunk_size, file_id_opt, args.default_language);
 	let mut collector = typst_languagetool::FileCollector::new(file_id_opt, &world);
 	let mut next_cache = Cache::new();
 	for (text, mapping) in paragraphs {
