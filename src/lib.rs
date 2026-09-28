@@ -135,10 +135,16 @@ impl FileCollector {
 		suggestions: &[Suggestion],
 		mapping: &Mapping,
 		ignore_functions: &HashSet<String>,
+		ignore_emphasis: bool,
 	) {
 		let diagnostics = suggestions.iter().filter_map(|suggestion| {
-			let locations =
-				mapping.location(suggestion, world, self.source.as_ref(), ignore_functions);
+			let locations = mapping.location(
+				suggestion,
+				world,
+				self.source.as_ref(),
+				ignore_functions,
+				ignore_emphasis,
+			);
 			if locations.is_empty() {
 				return None;
 			}
@@ -203,6 +209,13 @@ pub struct LanguageToolOptions {
 	/// Language used for text without `#set text(lang: ...)`
 	/// (e.g. "sv" or "sv-SE")
 	pub default_language: Option<String>,
+
+	/// Ignore raw text (inline code and code blocks) when spellchecking
+	/// (default: true)
+	pub ignore_raw: Option<bool>,
+	/// Ignore emphasis (`_..._` and `#emph[..]`) when spellchecking
+	/// (default: false)
+	pub ignore_emphasis: Option<bool>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -240,6 +253,8 @@ impl Default for LanguageToolOptions {
 				.map(String::from)
 				.collect(),
 			default_language: None,
+			ignore_raw: None,
+			ignore_emphasis: None,
 		}
 	}
 }
@@ -265,6 +280,8 @@ impl LanguageToolOptions {
 			disabled_checks: self.disabled_checks,
 			ignore_functions: self.ignore_functions,
 			default_language: other.default_language.or(self.default_language),
+			ignore_raw: other.ignore_raw.or(self.ignore_raw),
+			ignore_emphasis: other.ignore_emphasis.or(self.ignore_emphasis),
 		}
 	}
 }

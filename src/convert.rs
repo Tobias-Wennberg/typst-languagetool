@@ -18,21 +18,32 @@ use crate::Suggestion;
 fn is_call_to_ignored_function(
 	node: &typst::syntax::LinkedNode,
 	ignore_functions: &HashSet<String>,
+	ignore_emphasis: bool,
 ) -> bool {
 	match node.kind() {
 		SyntaxKind::FuncCall => node
 			.leftmost_leaf()
-			.map(|leaf| ignore_functions.contains(leaf.leaf_text().as_str()))
+			.map(|leaf| {
+				let name = leaf.leaf_text();
+				ignore_functions.contains(name.as_str()) || (ignore_emphasis && name == "emph")
+			})
 			.unwrap_or(false),
 		SyntaxKind::Ref => ignore_functions.contains("cite"),
 		_ => false,
 	}
 }
 
-fn should_ignore(node: &typst::syntax::LinkedNode, ignore_functions: &HashSet<String>) -> bool {
+fn should_ignore(
+	node: &typst::syntax::LinkedNode,
+	ignore_functions: &HashSet<String>,
+	ignore_emphasis: bool,
+) -> bool {
 	let mut current = Some(node);
 	while let Some(node) = current {
-		if is_call_to_ignored_function(node, ignore_functions) {
+		if ignore_emphasis && node.kind() == SyntaxKind::Emph {
+			return true;
+		}
+		if is_call_to_ignored_function(node, ignore_functions, ignore_emphasis) {
 			return true;
 		}
 		current = node.parent();
@@ -54,6 +65,7 @@ impl Mapping {
 		world: &impl World,
 		source: Option<&Source>,
 		ignore_functions: &HashSet<String>,
+		ignore_emphasis: bool,
 	) -> Vec<(FileId, Range<usize>)> {
 		let Some(chars) = &self.chars.get(suggestion.start..suggestion.end) else {
 			return Vec::new();
@@ -79,7 +91,7 @@ impl Mapping {
 				continue;
 			};
 
-			if should_ignore(&node, ignore_functions) {
+			if should_ignore(&node, ignore_functions, ignore_emphasis) {
 				continue;
 			}
 
@@ -141,6 +153,7 @@ pub fn content(
 		prev: Vec::new(),
 		default_language,
 		default_region,
+		raw_pending: false,
 	};
 	converter.iter_content(content, StyleChain::default());
 	converter.break_chunk();
@@ -156,6 +169,8 @@ struct Converter {
 	default_language: Lang,
 	default_region: Option<Region>,
 
+	raw_pending: bool,
+
 	prev: Vec<(String, Mapping)>,
 }
 
@@ -166,6 +181,12 @@ const EQUATION: &str = "0";
 const REFERENCE: &str = "X";
 const QUOTE: &str = "'";
 const DOUBLE_QUOTE: &str = "\"";
+// Digits keep LanguageTool from applying word rules to code adjacent to prose
+// (e.g. `a 0` stays clean) and from treating the placeholder as a word.
+const RAW: &str = "0";
+// Marks a `TextElem` that replaced a raw element during realization. See
+// `raw_rule` in lt-world.
+const RAW_SENTINEL: &str = "\u{e000}";
 
 impl Converter {
 	pub fn break_chunk(&mut self) {
@@ -173,6 +194,7 @@ impl Converter {
 			return;
 		}
 		let text = std::mem::take(&mut self.text);
+		self.raw_pending = false;
 		let mapping = Mapping {
 			chars: Vec::new(),
 			language: self.mapping.language,
@@ -195,6 +217,12 @@ impl Converter {
 	}
 
 	pub fn add_text(&mut self, text: &str, span: Span) {
+		if self.raw_pending {
+			self.raw_pending = false;
+			if text.chars().next().is_some_and(char::is_alphanumeric) {
+				self.add_text(SPACE, Span::detached());
+			}
+		}
 		if let Some(file) = self.file_id
 			&& let Some(current) = span.id()
 			&& file == current
@@ -212,11 +240,23 @@ impl Converter {
 		}
 	}
 
+	pub fn add_raw_placeholder(&mut self) {
+		if self.text.chars().next_back().is_some_and(char::is_alphanumeric) {
+			self.add_text(SPACE, Span::detached());
+		}
+		self.add_text(RAW, Span::detached());
+		self.raw_pending = true;
+	}
+
 	pub fn iter_content(&mut self, content: &Content, style: StyleChain) {
 		if let Some(styled) = content.to_packed::<StyledElem>() {
 			let style = style.chain(&styled.styles);
 			self.iter_content(&styled.child, style);
 		} else if let Some(text) = content.to_packed::<TextElem>() {
+			if text.text.as_str() == RAW_SENTINEL {
+				self.add_raw_placeholder();
+				return;
+			}
 			let has_lang = style.has(TextElem::lang);
 			let has_region = style.has(TextElem::region);
 			let lang = if has_lang {
@@ -319,11 +359,12 @@ mod tests {
 		world: lt_world::LtWorldRunning<'a>,
 		text: String,
 		mapping: Mapping,
+		ignore_emphasis: bool,
 	}
 
 	impl<'a> TestHarness<'a> {
 		fn new(world: &'a lt_world::LtWorld, main_file: &Path) -> Self {
-			Self::new_with_language(world, main_file, None)
+			Self::new_with_options(world, main_file, None, false)
 		}
 
 		fn new_with_language(
@@ -331,22 +372,32 @@ mod tests {
 			main_file: &Path,
 			default_language: Option<(Lang, Option<Region>)>,
 		) -> Self {
+			Self::new_with_options(world, main_file, default_language, false)
+		}
+
+		fn new_with_options(
+			world: &'a lt_world::LtWorld,
+			main_file: &Path,
+			default_language: Option<(Lang, Option<Region>)>,
+			ignore_emphasis: bool,
+		) -> Self {
 			let world = world.with_main(main_file.to_path_buf());
 			let doc = world.compile().unwrap();
 			let paragraphs = content(&doc, 1000, None, default_language);
 			assert_eq!(paragraphs.len(), 1, "expected exactly one paragraph");
 			let (text, mapping) = paragraphs.into_iter().next().unwrap();
-			Self { world, text, mapping }
+			Self { world, text, mapping, ignore_emphasis }
 		}
 
 		fn suggestion_for(&self, needle: &str) -> Suggestion {
-			let start = self
+			let byte_start = self
 				.text
 				.find(needle)
 				.unwrap_or_else(|| panic!("expected '{}' in text: {:?}", needle, self.text));
+			let start = self.text[..byte_start].encode_utf16().count();
 			Suggestion {
 				start,
-				end: start + needle.len(),
+				end: start + needle.encode_utf16().count(),
 				message: "test".into(),
 				replacements: vec![],
 				rule_description: "test".into(),
@@ -361,8 +412,13 @@ mod tests {
 		) -> Vec<(typst::syntax::FileId, std::ops::Range<usize>)> {
 			let ignore_set: HashSet<String> =
 				ignore_functions.iter().map(|s| s.to_string()).collect();
-			self.mapping
-				.location(suggestion, &self.world, None, &ignore_set)
+			self.mapping.location(
+				suggestion,
+				&self.world,
+				None,
+				&ignore_set,
+				self.ignore_emphasis,
+			)
 		}
 
 		fn is_ignored(&self, needle: &str, ignore_functions: &[&str]) -> bool {
@@ -374,7 +430,7 @@ mod tests {
 
 	#[test]
 	fn test_reference_keeps_surrounding_text_intact() {
-		let world = lt_world::LtWorld::new("example".into());
+		let world = lt_world::LtWorld::new("example".into(), true);
 		let harness = TestHarness::new(&world, Path::new("example/reference.typ"));
 
 		assert_eq!(
@@ -393,7 +449,7 @@ mod tests {
 
 	#[test]
 	fn test_inline_wrapper_keeps_paragraph() {
-		let world = lt_world::LtWorld::new("example".into());
+		let world = lt_world::LtWorld::new("example".into(), true);
 		let harness = TestHarness::new(&world, Path::new("example/inline.typ"));
 
 		assert_eq!(
@@ -406,7 +462,7 @@ mod tests {
 
 	#[test]
 	fn test_heading_not_glued_to_following_text() {
-		let world = lt_world::LtWorld::new("example".into());
+		let world = lt_world::LtWorld::new("example".into(), true);
 		let harness = TestHarness::new(&world, Path::new("example/heading.typ"));
 
 		assert_eq!(
@@ -419,7 +475,7 @@ mod tests {
 
 	#[test]
 	fn test_ignore_functions_filters_ancestors() {
-		let world = lt_world::LtWorld::new("example".into());
+		let world = lt_world::LtWorld::new("example".into(), true);
 		let harness = TestHarness::new(&world, Path::new("example/ignore.typ"));
 
 		// lambda is replaced by 0 because it is in an equation
@@ -435,7 +491,7 @@ mod tests {
 
 	#[test]
 	fn test_ignore_functions_content_block_syntax() {
-		let world = lt_world::LtWorld::new("example".into());
+		let world = lt_world::LtWorld::new("example".into(), true);
 		let harness = TestHarness::new(&world, Path::new("example/content_block.typ"));
 
 		assert!(
@@ -458,8 +514,102 @@ mod tests {
 	}
 
 	#[test]
+	fn test_raw_is_replaced_by_placeholder() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let harness = TestHarness::new(&world, Path::new("example/raw.typ"));
+
+		assert_eq!(
+			RAW_SENTINEL,
+			lt_world::RAW_PLACEHOLDER,
+			"the converter must recognize the placeholder emitted by lt-world"
+		);
+		assert!(
+			!harness.text.contains(RAW_SENTINEL),
+			"the raw sentinel must not reach LanguageTool: {:?}",
+			harness.text
+		);
+		assert_eq!(
+			harness.text.matches("Använd 0 och 0.").count(),
+			1,
+			"raw must be replaced by a placeholder that keeps punctuation attached: {:?}",
+			harness.text
+		);
+		assert!(
+			!harness.text.contains("prechecks") && !harness.text.contains("certificates"),
+			"raw content must not be spellchecked: {:?}",
+			harness.text
+		);
+		assert_eq!(
+			harness.mapping.language(),
+			"sv",
+			"raw must not switch the checked language: {:?}",
+			harness.text
+		);
+		assert!(
+			harness.is_ignored("0", &[]),
+			"suggestions on the raw placeholder must map to no location"
+		);
+	}
+
+	#[test]
+	fn test_raw_is_kept_when_not_ignored() {
+		let world = lt_world::LtWorld::new("example".into(), false);
+		let world = world.with_main(Path::new("example/raw.typ").to_path_buf());
+		let doc = world.compile().unwrap();
+		let text: String = content(&doc, 1000, None, None)
+			.into_iter()
+			.map(|(text, _)| text)
+			.collect();
+
+		assert!(
+			text.contains("prechecks"),
+			"raw content must be checked when ignore_raw is disabled: {:?}",
+			text
+		);
+	}
+
+	#[test]
+	fn test_raw_placeholder_keeps_adjacent_words_apart() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let harness = TestHarness::new(&world, Path::new("example/raw_glued.typ"));
+
+		assert_eq!(
+			harness.text.matches("foo 0 baz").count(),
+			1,
+			"a placeholder glued to words must be separated: {:?}",
+			harness.text
+		);
+	}
+
+	#[test]
+	fn test_emphasis_is_ignored_when_enabled() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+
+		let checked = TestHarness::new(&world, Path::new("example/emph.typ"));
+		assert!(
+			!checked.is_ignored("prechecks", &[]),
+			"emphasis must be checked when ignore_emphasis is disabled"
+		);
+
+		let ignored = TestHarness::new_with_options(
+			&world,
+			Path::new("example/emph.typ"),
+			None,
+			true,
+		);
+		assert!(
+			ignored.is_ignored("prechecks", &[]),
+			"emphasis must be ignored when ignore_emphasis is enabled"
+		);
+		assert!(
+			ignored.is_ignored("certificates", &[]),
+			"#emph[..] must be ignored when ignore_emphasis is enabled"
+		);
+	}
+
+	#[test]
 	fn test_default_language_when_document_sets_none() {
-		let world = lt_world::LtWorld::new("example".into());
+		let world = lt_world::LtWorld::new("example".into(), true);
 		let default = crate::parse_language("sv-SE").unwrap();
 		let harness = TestHarness::new_with_language(
 			&world,
@@ -476,7 +626,7 @@ mod tests {
 
 	#[test]
 	fn test_default_language_is_overridden_by_document() {
-		let world = lt_world::LtWorld::new("example".into());
+		let world = lt_world::LtWorld::new("example".into(), true);
 		let default = crate::parse_language("sv-SE").unwrap();
 		let harness = TestHarness::new_with_language(
 			&world,

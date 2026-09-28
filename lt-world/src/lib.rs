@@ -15,7 +15,7 @@ use typst::{
 	routines::{Arenas, RealizationKind},
 	syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot},
 	text::{
-		Font, HighlightElem, OverlineElem, SmallcapsElem, StrikeElem, SubElem, SuperElem,
+		Font, HighlightElem, OverlineElem, RawElem, SmallcapsElem, StrikeElem, SubElem, SuperElem,
 		TextElem, UnderlineElem,
 	},
 	utils::{LazyHash, Protected},
@@ -46,6 +46,22 @@ fn equation_rule(
 	_: StyleChain,
 ) -> SourceResult<Content> {
 	Ok(TextElem::packed("0").spanned(elem.span()))
+}
+
+/// Placeholder emitted for raw content, recognized by the converter.
+///
+/// The private use character cannot appear in normal text and, unlike the
+/// placeholder itself, is not touched by `raw`'s show-set rules (especially
+/// `TextElem::lang`), which would otherwise split the checked text into
+/// separate language chunks.
+pub const RAW_PLACEHOLDER: &str = "\u{e000}";
+
+/// Replaces raw content with [`RAW_PLACEHOLDER`].
+///
+/// Like [`reference_rule`], this keeps paragraph grouping intact. Only
+/// registered when raw content should not be spellchecked.
+fn raw_rule(elem: &Packed<RawElem>, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+	Ok(TextElem::packed(RAW_PLACEHOLDER).spanned(elem.span()))
 }
 
 /// Defines rules that replace an inline wrapper with its body, and a function
@@ -103,7 +119,7 @@ pub struct LtWorldRunning<'a> {
 }
 
 impl LtWorld {
-	pub fn new(root: PathBuf) -> Self {
+	pub fn new(root: PathBuf, ignore_raw: bool) -> Self {
 		let root = root.canonicalize().unwrap();
 
 		let mut fonts = FontStore::new();
@@ -119,6 +135,9 @@ impl LtWorld {
 			library.rules.register(Target::Paged, reference_rule);
 			library.rules.register(Target::Paged, citation_rule);
 			library.rules.register(Target::Paged, equation_rule);
+			if ignore_raw {
+				library.rules.register(Target::Paged, raw_rule);
+			}
 			register_body_rules(&mut library.rules);
 			LazyHash::new(library)
 		};

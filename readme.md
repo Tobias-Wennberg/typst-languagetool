@@ -103,6 +103,10 @@ ignore_functions: HashSet<String>,
 /// Language (and optional region) for text without `#set text(lang: ...)`
 /// e.g. "sv" or "sv-SE"
 default_language: Option<String>,
+/// Ignore raw text (inline code and code blocks) when checking (default: true)
+ignore_raw: Option<bool>,
+/// Ignore emphasis (`_..._`, `#emph[..]`) when checking (default: false)
+ignore_emphasis: Option<bool>,
 
 /// specify used backend
 backend: "bundle" | "jar" | "server",

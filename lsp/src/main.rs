@@ -99,6 +99,7 @@ struct Options {
 	on_change: Option<std::time::Duration>,
 	main: Option<PathBuf>,
 	ignore_functions: HashSet<String>,
+	ignore_emphasis: bool,
 	default_language: Option<(Lang, Option<Region>)>,
 }
 
@@ -143,7 +144,11 @@ impl State {
 		eprintln!("Options: {:#?}", options);
 		let lt = LanguageTool::new(&options.lt).await?;
 
-		let world = lt_world::LtWorld::new(options.lt.root.clone().unwrap_or_else(|| ".".into()));
+		let ignore_raw = options.lt.ignore_raw.unwrap_or(true);
+		let world = lt_world::LtWorld::new(
+			options.lt.root.clone().unwrap_or_else(|| ".".into()),
+			ignore_raw,
+		);
 
 		eprintln!("Compiling document");
 
@@ -162,6 +167,7 @@ impl State {
 				chunk_size: options.lt.chunk_size,
 				main: options.lt.main,
 				ignore_functions: options.lt.ignore_functions,
+				ignore_emphasis: options.lt.ignore_emphasis.unwrap_or(false),
 				default_language,
 			},
 		})
@@ -423,7 +429,7 @@ impl State {
 		};
 
 		if let Some(root) = options.lt.root {
-			self.world = LtWorld::new(root);
+			self.world = LtWorld::new(root, options.lt.ignore_raw.unwrap_or(true));
 		}
 
 		let default_language =
@@ -440,6 +446,7 @@ impl State {
 			chunk_size: options.lt.chunk_size,
 			main: options.lt.main,
 			ignore_functions: options.lt.ignore_functions,
+			ignore_emphasis: options.lt.ignore_emphasis.unwrap_or(false),
 			default_language,
 		};
 
@@ -489,6 +496,7 @@ impl State {
 				&suggestions,
 				&mapping,
 				&self.options.ignore_functions,
+				self.options.ignore_emphasis,
 			);
 			next_cache.insert(text, lang, suggestions);
 		}

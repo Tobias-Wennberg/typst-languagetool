@@ -104,6 +104,8 @@ struct Args {
 	delay: f64,
 	plain: bool,
 	default_language: Option<(Lang, Option<Region>)>,
+	ignore_raw: bool,
+	ignore_emphasis: bool,
 	lt: LanguageToolOptions,
 }
 
@@ -148,6 +150,8 @@ async fn main() -> anyhow::Result<()> {
 		delay: cli_args.delay,
 		plain: cli_args.plain,
 		default_language: None,
+		ignore_raw: true,
+		ignore_emphasis: false,
 		lt: LanguageToolOptions {
 			root: cli_args.root,
 			main: cli_args.main,
@@ -170,11 +174,16 @@ async fn main() -> anyhow::Result<()> {
 		.map(typst_languagetool::parse_language)
 		.transpose()
 		.context("Invalid `default_language` option")?;
-	let args = Args { default_language, ..args };
+	let ignore_raw = args.lt.ignore_raw.unwrap_or(true);
+	let ignore_emphasis = args.lt.ignore_emphasis.unwrap_or(false);
+	let args = Args { default_language, ignore_raw, ignore_emphasis, ..args };
 
 	let lt = LanguageTool::new(&args.lt).await?;
 
-	let world = lt_world::LtWorld::new(args.lt.root.clone().unwrap_or(".".into()));
+	let world = lt_world::LtWorld::new(
+		args.lt.root.clone().unwrap_or(".".into()),
+		args.ignore_raw,
+	);
 
 	match args.task {
 		Task::Check => check(args, lt, world).await?,
@@ -295,8 +304,12 @@ async fn handle_file(
 	let file_id = world.file_id(path).unwrap();
 	let file_id_opt = include_all.not().then_some(file_id);
 
-	let paragraphs =
-		typst_languagetool::convert::content(&doc, chunk_size, file_id_opt, args.default_language);
+	let paragraphs = typst_languagetool::convert::content(
+		&doc,
+		chunk_size,
+		file_id_opt,
+		args.default_language,
+	);
 	let mut collector = typst_languagetool::FileCollector::new(file_id_opt, &world);
 	let mut next_cache = Cache::new();
 	for (text, mapping) in paragraphs {
@@ -307,7 +320,13 @@ async fn handle_file(
 			lt.check_text(lang.clone(), &text).await?
 		};
 
-		collector.add(&world, &suggestions, &mapping, &args.lt.ignore_functions);
+		collector.add(
+			&world,
+			&suggestions,
+			&mapping,
+			&args.lt.ignore_functions,
+			args.ignore_emphasis,
+		);
 		next_cache.insert(text, lang, suggestions);
 	}
 	*cache = next_cache;
