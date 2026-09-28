@@ -66,6 +66,10 @@ Spellcheck typst files with LanguageTool.
 	- Project root can be changed
 		- defaults to main parent folder
 		- `--root=<path>`
+	- Compile errors
+		- are printed with their source location
+		- `check` exits with a non-zero status, `watch` keeps watching
+		- text that could still be realized is checked anyway
 - vs-codium/vs-code
 	- install language server protocol (LSP)
 		- `cargo install --git=https://github.com/antonWetzel/typst-languagetool lsp --features=...`

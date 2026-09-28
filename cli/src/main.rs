@@ -194,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn check(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Result<()> {
-	handle_file(
+	let success = handle_file(
 		args.path
 			.as_ref()
 			.or(args.lt.main.as_ref())
@@ -207,6 +207,9 @@ async fn check(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Resu
 		args.path.is_none(),
 	)
 	.await?;
+	if !success {
+		std::process::exit(1);
+	}
 	Ok(())
 }
 
@@ -284,24 +287,41 @@ async fn handle_file(
 	chunk_size: usize,
 	cache: &mut Cache,
 	include_all: bool,
-) -> anyhow::Result<()> {
-	let world = world.with_main(args.lt.main.clone().unwrap_or(path.to_owned()));
-	let doc = match world.compile() {
-		Ok(doc) => doc,
-		Err(err) => {
-			if args.plain {
-				println!("Failed to compile document!");
-			} else {
-				println!("{}", "Failed to compile document!\n".red().bold());
-			}
-			for dia in err {
-				println!("\t{:?}", dia);
-			}
-			return Ok(());
-		},
+) -> anyhow::Result<bool> {
+	let main = args.lt.main.clone().unwrap_or(path.to_owned());
+	let Some(world) = world.with_main(main.clone()) else {
+		if args.plain {
+			println!("error file not found: {}", main.display());
+		} else {
+			println!("{} file not found: {}", "error:".red().bold(), main.display());
+		}
+		return Ok(false);
 	};
 
-	let file_id = world.file_id(path).unwrap();
+	let compiled = world.compile();
+	let success = compiled.errors.is_empty();
+	if !success && !args.plain {
+		println!("{}", "Failed to compile document!\n".red().bold());
+	}
+	for diagnostic in &compiled.errors {
+		if args.plain {
+			output::compile_plain(&world, diagnostic);
+		} else {
+			output::compile_pretty(&world, diagnostic);
+		}
+	}
+	let Some(doc) = compiled.content else {
+		return Ok(false);
+	};
+
+	let Some(file_id) = world.file_id(path) else {
+		if args.plain {
+			println!("error file not found: {}", path.display());
+		} else {
+			println!("{} file not found: {}", "error:".red().bold(), path.display());
+		}
+		return Ok(false);
+	};
 	let file_id_opt = include_all.not().then_some(file_id);
 
 	let paragraphs = typst_languagetool::convert::content(
@@ -368,7 +388,7 @@ async fn handle_file(
 			}
 		}
 	}
-	Ok(())
+	Ok(success)
 }
 
 fn plain_start() {

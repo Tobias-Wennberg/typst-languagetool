@@ -454,19 +454,23 @@ impl State {
 	}
 
 	async fn get_diagnostics(&mut self, path: &Path) -> anyhow::Result<Vec<Diagnostic>> {
-		let world = self
+		let Some(world) = self
 			.world
-			.with_main(self.options.main.clone().unwrap_or_else(|| path.to_owned()));
+			.with_main(self.options.main.clone().unwrap_or_else(|| path.to_owned()))
+		else {
+			eprintln!("File not found: {}", path.display());
+			return Ok(Vec::new());
+		};
 		eprintln!("Compiling");
-		let doc = match world.compile() {
-			Ok(doc) => doc,
-			Err(err) => {
-				eprintln!("Failed to compile document");
-				for dia in err {
-					eprintln!("\t{:?}", dia);
-				}
-				return Ok(Vec::new());
-			},
+		let compiled = world.compile();
+		if !compiled.errors.is_empty() {
+			eprintln!("Failed to compile document");
+			for dia in &compiled.errors {
+				eprintln!("\t{:?}", dia);
+			}
+		}
+		let Some(doc) = compiled.content else {
+			return Ok(Vec::new());
 		};
 
 		let Some(file_id) = self.world.file_id(path) else {

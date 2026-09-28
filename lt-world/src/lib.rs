@@ -6,7 +6,7 @@ use std::{
 
 use typst::{
 	Library, LibraryExt, World,
-	diag::{FileError, FileResult, SourceResult},
+	diag::{FileError, FileResult, SourceDiagnostic, SourceResult},
 	engine::{Engine, Route, Sink, Traced},
 	foundations::{Content, Duration, NativeRuleMap, Packed, StyleChain, Target, TargetElem},
 	introspection::{EmptyIntrospector, Introspector, Locator},
@@ -15,7 +15,7 @@ use typst::{
 		CiteElem, DocumentInfo, EmphElem, FootnoteElem, LinkElem, QuoteElem, RefElem, StrongElem,
 	},
 	routines::{Arenas, RealizationKind},
-	syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot},
+	syntax::{FileId, RootedPath, Source, Span, VirtualPath, VirtualRoot},
 	text::{
 		Font, HighlightElem, OverlineElem, RawElem, SmallcapsElem, StrikeElem, SubElem, SuperElem,
 		TextElem, UnderlineElem,
@@ -190,7 +190,7 @@ impl LtWorld {
 	}
 
 	pub fn file_id(&self, path: &Path) -> Option<FileId> {
-		let path = path.canonicalize().unwrap();
+		let path = path.canonicalize().ok()?;
 		let path = VirtualPath::virtualize(self.root.path(), &path).ok()?;
 		let id = RootedPath::new(VirtualRoot::Project, path).intern();
 		Some(id)
@@ -223,9 +223,9 @@ impl LtWorld {
 		}
 	}
 
-	pub fn with_main(&self, main: PathBuf) -> LtWorldRunning<'_> {
-		let main = self.file_id(&main).unwrap();
-		LtWorldRunning { world: self, main }
+	pub fn with_main(&self, main: PathBuf) -> Option<LtWorldRunning<'_>> {
+		let main = self.file_id(&main)?;
+		Some(LtWorldRunning { world: self, main })
 	}
 }
 
@@ -237,25 +237,45 @@ impl Deref for LtWorldRunning<'_> {
 	}
 }
 
+/// The outcome of [`LtWorldRunning::compile`].
+pub struct Compiled {
+	/// The realized content, if evaluation got far enough to produce any.
+	pub content: Option<Content>,
+	/// Errors encountered while evaluating and realizing the document.
+	pub errors: Vec<SourceDiagnostic>,
+}
+
 impl LtWorldRunning<'_> {
-	pub fn compile(&self) -> SourceResult<Content> {
+	pub fn compile(&self) -> Compiled {
 		use typst::comemo::{Constraint, Track};
 
 		let mut sink = Sink::new();
 		let world = (self as &dyn World).track();
 
 		let main = world.main();
-		let main = world.source(main).expect("source exist");
+		let main = match world.source(main) {
+			Ok(source) => source,
+			Err(err) => {
+				return Compiled {
+					content: None,
+					errors: vec![SourceDiagnostic::error(Span::detached(), err.to_string())],
+				};
+			},
+		};
 
-		let content = typst_eval::eval(
+		let content = match typst_eval::eval(
 			world,
 			&self.library,
 			Traced::default().track(),
 			sink.track_mut(),
 			Route::default().track(),
 			&main,
-		)?
-		.content();
+		) {
+			Ok(content) => content.content(),
+			Err(errors) => {
+				return Compiled { content: None, errors: errors.into_iter().collect() };
+			},
+		};
 
 		// Realize the content to apply show rules and expand `context`
 		// expressions, which evaluation leaves opaque.
@@ -279,14 +299,19 @@ impl LtWorldRunning<'_> {
 		let mut locator = Locator::root().split();
 		let arenas = Arenas::default();
 		let mut info = DocumentInfo::default();
-		let children = (self.realize_library.routines.realize)(
+		let children = match (self.realize_library.routines.realize)(
 			RealizationKind::Document { info: &mut info },
 			&mut engine,
 			&mut locator,
 			&arenas,
 			&content,
 			styles,
-		)?;
+		) {
+			Ok(children) => children,
+			Err(errors) => {
+				return Compiled { content: None, errors: errors.into_iter().collect() };
+			},
+		};
 
 		let content = Content::sequence(
 			children
@@ -294,7 +319,9 @@ impl LtWorldRunning<'_> {
 				.map(|(content, styles)| content.clone().styled_with_map(styles.to_map())),
 		);
 
-		Ok(content)
+		// Show rule errors are delayed until the end of realization, see
+		// `Engine::delay`.
+		Compiled { content: Some(content), errors: sink.delayed().into_iter().collect() }
 	}
 }
 

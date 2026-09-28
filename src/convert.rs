@@ -430,8 +430,10 @@ mod tests {
 			default_language: Option<(Lang, Option<Region>)>,
 			ignore_emphasis: bool,
 		) -> Self {
-			let world = world.with_main(main_file.to_path_buf());
-			let doc = world.compile().unwrap();
+			let world = world.with_main(main_file.to_path_buf()).unwrap();
+			let compiled = world.compile();
+			assert!(compiled.errors.is_empty(), "{:?}", compiled.errors);
+			let doc = compiled.content.unwrap();
 			let paragraphs = content(&doc, 1000, None, default_language);
 			assert_eq!(paragraphs.len(), 1, "expected exactly one paragraph");
 			let (text, mapping) = paragraphs.into_iter().next().unwrap();
@@ -603,8 +605,8 @@ mod tests {
 	#[test]
 	fn test_raw_is_kept_when_not_ignored() {
 		let world = lt_world::LtWorld::new("example".into(), false);
-		let world = world.with_main(Path::new("example/raw.typ").to_path_buf());
-		let doc = world.compile().unwrap();
+		let world = world.with_main(Path::new("example/raw.typ").to_path_buf()).unwrap();
+		let doc = world.compile().content.unwrap();
 		let text: String = content(&doc, 1000, None, None)
 			.into_iter()
 			.map(|(text, _)| text)
@@ -662,8 +664,8 @@ mod tests {
 		assert_eq!(FOOTNOTE_END, lt_world::FOOTNOTE_END);
 
 		let world = lt_world::LtWorld::new("example".into(), true);
-		let world = world.with_main(Path::new("example/footnote.typ").to_path_buf());
-		let doc = world.compile().unwrap();
+		let world = world.with_main(Path::new("example/footnote.typ").to_path_buf()).unwrap();
+		let doc = world.compile().content.unwrap();
 		let paragraphs: Vec<String> = content(&doc, 1000, None, None)
 			.into_iter()
 			.map(|(text, _)| text)
@@ -691,8 +693,10 @@ mod tests {
 	#[test]
 	fn test_footnote_keeps_adjacent_words_apart() {
 		let world = lt_world::LtWorld::new("example".into(), true);
-		let world = world.with_main(Path::new("example/footnote_glued.typ").to_path_buf());
-		let doc = world.compile().unwrap();
+		let world = world
+			.with_main(Path::new("example/footnote_glued.typ").to_path_buf())
+			.unwrap();
+		let doc = world.compile().content.unwrap();
 		let paragraphs: Vec<String> = content(&doc, 1000, None, None)
 			.into_iter()
 			.map(|(text, _)| text)
@@ -707,6 +711,36 @@ mod tests {
 			paragraphs.iter().any(|text| text.trim() == "Note text"),
 			"the footnote body must be checked as its own chunk: {:?}",
 			paragraphs
+		);
+	}
+
+	#[test]
+	fn test_compile_errors_are_reported() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+
+		let fatal = world
+			.with_main(Path::new("example/broken.typ").to_path_buf())
+			.unwrap()
+			.compile();
+		assert!(fatal.content.is_none(), "a fatal evaluation error must not produce content");
+		assert!(!fatal.errors.is_empty(), "a fatal evaluation error must be reported");
+
+		let delayed = world
+			.with_main(Path::new("example/broken_show.typ").to_path_buf())
+			.unwrap()
+			.compile();
+		assert!(delayed.content.is_some(), "partial content must survive a show rule error");
+		assert!(!delayed.errors.is_empty(), "a show rule error must be reported");
+
+		let doc = delayed.content.unwrap();
+		let text: String = content(&doc, 1000, None, None)
+			.into_iter()
+			.map(|(text, _)| text)
+			.collect();
+		assert!(
+			text.contains("This is fine."),
+			"the rest of the document must still be checked: {:?}",
+			text
 		);
 	}
 
