@@ -482,6 +482,7 @@ impl State {
 			self.options.chunk_size,
 			Some(file_id),
 			self.options.default_language,
+			self.world.ignore_raw(),
 		);
 		let mut collector = typst_languagetool::FileCollector::new(Some(file_id), &world);
 		let mut next_cache = Cache::new();

@@ -140,6 +140,8 @@ pub struct LtWorld {
 
 	fonts: FontStore,
 	shadow_files: HashMap<FileId, Source>,
+
+	ignore_raw: bool,
 }
 
 pub struct LtWorldRunning<'a> {
@@ -182,11 +184,17 @@ impl LtWorld {
 			fonts,
 			root: FsRoot::new(root),
 			shadow_files: HashMap::new(),
+
+			ignore_raw,
 		}
 	}
 
 	pub fn root(&self) -> &Path {
 		self.root.path()
+	}
+
+	pub fn ignore_raw(&self) -> bool {
+		self.ignore_raw
 	}
 
 	pub fn file_id(&self, path: &Path) -> Option<FileId> {

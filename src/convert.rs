@@ -5,7 +5,7 @@ use std::{
 
 use typst::{
 	World,
-	foundations::{Content, SequenceElem, StyleChain, StyledElem, Value},
+	foundations::{Content, Packed, SequenceElem, StyleChain, StyledElem, Value},
 	introspection::TagElem,
 	math::EquationElem,
 	model::{
@@ -14,8 +14,8 @@ use typst::{
 	},
 	syntax::{FileId, Source, Span, SyntaxKind},
 	text::{
-		HighlightElem, Lang, OverlineElem, Region, SmallcapsElem, SmartQuoteElem, SpaceElem,
-		StrikeElem, SubElem, SuperElem, TextElem, UnderlineElem,
+		HighlightElem, Lang, OverlineElem, RawContent, RawElem, Region, SmallcapsElem,
+		SmartQuoteElem, SpaceElem, StrikeElem, SubElem, SuperElem, TextElem, UnderlineElem,
 	},
 };
 
@@ -177,6 +177,7 @@ pub fn content(
 	chunk_size: usize,
 	file_id: Option<FileId>,
 	default_language: Option<(Lang, Option<Region>)>,
+	ignore_raw: bool,
 ) -> Vec<(String, Mapping)> {
 	let (default_language, default_region) = default_language.unwrap_or((Lang::ENGLISH, None));
 	let mut converter = Converter {
@@ -194,6 +195,7 @@ pub fn content(
 		default_region,
 		separator_pending: false,
 		footnotes: Vec::new(),
+		ignore_raw,
 	};
 	converter.iter_content(content, StyleChain::default());
 	converter.break_chunk();
@@ -213,6 +215,7 @@ struct Converter {
 	footnotes: Vec<Captured>,
 
 	prev: Vec<(String, Mapping)>,
+	ignore_raw: bool,
 }
 
 struct Captured {
@@ -291,12 +294,16 @@ impl Converter {
 		}
 	}
 
-	pub fn add_raw_placeholder(&mut self) {
+	pub fn add_raw(&mut self, text: &str, span: Span) {
 		if self.text.chars().next_back().is_some_and(char::is_alphanumeric) {
 			self.add_text(SPACE, Span::detached());
 		}
-		self.add_text(RAW, Span::detached());
+		self.add_text(text, span);
 		self.separator_pending = true;
+	}
+
+	pub fn add_raw_placeholder(&mut self) {
+		self.add_raw(RAW, Span::detached());
 	}
 
 	pub fn begin_footnote(&mut self) {
@@ -323,6 +330,38 @@ impl Converter {
 			self.contains_file = captured.contains_file;
 		}
 		self.separator_pending = true;
+	}
+
+	pub fn iter_raw(&mut self, raw: &Packed<RawElem>, style: StyleChain) {
+		if self.ignore_raw {
+			self.add_raw_placeholder();
+			return;
+		}
+
+		let lines = raw.lines.as_deref().unwrap_or_default();
+		if lines.is_empty() {
+			let text = match &raw.text {
+				RawContent::Text(text) => text.clone(),
+				RawContent::Lines(lines) => {
+					let mut text = String::new();
+					for (i, (line, _)) in lines.iter().enumerate() {
+						if i > 0 {
+							text.push('\n');
+						}
+						text.push_str(line);
+					}
+					text.into()
+				},
+			};
+			self.add_raw(&text, raw.span());
+			return;
+		}
+
+		for line in lines {
+			self.iter_content(&line.body, style);
+			self.maybe_add_text(SPACE, line.span());
+		}
+		self.maybe_add_text(SPACE, raw.span());
 	}
 
 	pub fn iter_content(&mut self, content: &Content, style: StyleChain) {
@@ -414,6 +453,8 @@ impl Converter {
 			self.add_text(REFERENCE, cite.span());
 		} else if content.is::<TagElem>() {
 			// No text and no space for zero-width introspection tags.
+		} else if let Some(raw) = content.to_packed::<RawElem>() {
+			self.iter_raw(raw, style);
 		} else if let Some(body) = inline_body(content) {
 			self.iter_content(body, style);
 		} else {
@@ -475,7 +516,7 @@ mod tests {
 			let compiled = world.compile();
 			assert!(compiled.errors.is_empty(), "{:?}", compiled.errors);
 			let doc = compiled.content.unwrap();
-			let paragraphs = content(&doc, 1000, None, default_language);
+			let paragraphs = content(&doc, 1000, None, default_language, world.ignore_raw());
 			assert_eq!(paragraphs.len(), 1, "expected exactly one paragraph");
 			let (text, mapping) = paragraphs.into_iter().next().unwrap();
 			Self { world, text, mapping, ignore_emphasis }
@@ -648,7 +689,7 @@ mod tests {
 		let world = lt_world::LtWorld::new("example".into(), false);
 		let world = world.with_main(Path::new("example/raw.typ").to_path_buf()).unwrap();
 		let doc = world.compile().content.unwrap();
-		let text: String = content(&doc, 1000, None, None)
+		let text: String = content(&doc, 1000, None, None, world.ignore_raw())
 			.into_iter()
 			.map(|(text, _)| text)
 			.collect();
@@ -670,6 +711,42 @@ mod tests {
 			1,
 			"a placeholder glued to words must be separated: {:?}",
 			harness.text
+		);
+	}
+
+	#[test]
+	fn test_raw_in_list_is_replaced_by_placeholder() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let harness = TestHarness::new(&world, Path::new("example/raw_list.typ"));
+
+		assert_eq!(
+			harness.text.matches("0 är 1. 0 är 3.").count(),
+			1,
+			"raw in list items must become placeholders: {:?}",
+			harness.text
+		);
+		assert!(
+			!harness.text.contains("adam") && !harness.text.contains("bertil"),
+			"raw content must not be spellchecked: {:?}",
+			harness.text
+		);
+	}
+
+	#[test]
+	fn test_raw_in_list_is_checked_when_not_ignored() {
+		let world = lt_world::LtWorld::new("example".into(), false);
+		let world = world.with_main(Path::new("example/raw_list.typ").to_path_buf()).unwrap();
+		let doc = world.compile().content.unwrap();
+		let text: String = content(&doc, 1000, None, None, world.ignore_raw())
+			.into_iter()
+			.map(|(text, _)| text)
+			.collect();
+
+		assert_eq!(
+			text.matches("adam är 1. bertil är 3.").count(),
+			1,
+			"raw in list items must be checked when ignore_raw is disabled: {:?}",
+			text
 		);
 	}
 
@@ -720,7 +797,7 @@ mod tests {
 		let world = lt_world::LtWorld::new("example".into(), true);
 		let world = world.with_main(Path::new("example/footnote.typ").to_path_buf()).unwrap();
 		let doc = world.compile().content.unwrap();
-		let paragraphs: Vec<String> = content(&doc, 1000, None, None)
+		let paragraphs: Vec<String> = content(&doc, 1000, None, None, world.ignore_raw())
 			.into_iter()
 			.map(|(text, _)| text)
 			.collect();
@@ -751,7 +828,7 @@ mod tests {
 			.with_main(Path::new("example/footnote_glued.typ").to_path_buf())
 			.unwrap();
 		let doc = world.compile().content.unwrap();
-		let paragraphs: Vec<String> = content(&doc, 1000, None, None)
+		let paragraphs: Vec<String> = content(&doc, 1000, None, None, world.ignore_raw())
 			.into_iter()
 			.map(|(text, _)| text)
 			.collect();
@@ -787,7 +864,7 @@ mod tests {
 		assert!(!delayed.errors.is_empty(), "a show rule error must be reported");
 
 		let doc = delayed.content.unwrap();
-		let text: String = content(&doc, 1000, None, None)
+		let text: String = content(&doc, 1000, None, None, world.ignore_raw())
 			.into_iter()
 			.map(|(text, _)| text)
 			.collect();
