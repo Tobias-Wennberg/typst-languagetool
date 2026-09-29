@@ -50,9 +50,16 @@ fn should_ignore(
 	false
 }
 
+#[derive(Debug, Clone)]
+struct MappedChar {
+	span: Span,
+	range: Range<u16>,
+	emph: bool,
+}
+
 #[derive(Debug)]
 pub struct Mapping {
-	chars: Vec<(Span, Range<u16>)>,
+	chars: Vec<MappedChar>,
 	language: Lang,
 	region: Option<Region>,
 }
@@ -70,7 +77,10 @@ impl Mapping {
 			return Vec::new();
 		};
 		let mut locations = Vec::<(FileId, Range<usize>)>::new();
-		for (span, range) in chars.iter().cloned() {
+		for MappedChar { span, range, emph } in chars.iter().cloned() {
+			if ignore_emphasis && emph {
+				continue;
+			}
 			let Some(id) = span.id() else {
 				continue;
 			};
@@ -226,6 +236,7 @@ pub fn content(
 		separator_pending: false,
 		footnotes: Vec::new(),
 		language_set: false,
+		emph_depth: 0,
 	};
 	converter.iter_content(content, StyleChain::default());
 	converter.break_chunk();
@@ -246,6 +257,7 @@ struct Converter {
 
 	prev: Vec<(String, Mapping)>,
 	language_set: bool,
+	emph_depth: usize,
 }
 
 struct Captured {
@@ -268,6 +280,9 @@ const RAW: &str = "0";
 const RAW_SENTINEL: &str = "\u{e000}";
 const FOOTNOTE_START: &str = "\u{e001}";
 const FOOTNOTE_END: &str = "\u{e002}";
+// Mark emphasized content during realization. See the `emph_rule` in lt-world.
+const EMPH_START: &str = "\u{e003}";
+const EMPH_END: &str = "\u{e004}";
 
 impl Converter {
 	pub fn break_chunk(&mut self) {
@@ -314,12 +329,13 @@ impl Converter {
 			self.contains_file = true;
 		}
 		self.text += text;
+		let emph = self.emph_depth > 0;
 		let mut buf = [0; 2];
 		for (idx, c) in text.char_indices() {
 			let n = c.encode_utf16(&mut buf).len();
 			let range = (idx as u16)..((idx + c.len_utf8()) as u16);
 			for _ in &buf[..n] {
-				self.mapping.chars.push((span, range.clone()));
+				self.mapping.chars.push(MappedChar { span, range: range.clone(), emph });
 			}
 		}
 	}
@@ -376,6 +392,14 @@ impl Converter {
 				},
 				FOOTNOTE_END => {
 					self.end_footnote();
+					return;
+				},
+				EMPH_START => {
+					self.emph_depth += 1;
+					return;
+				},
+				EMPH_END => {
+					self.emph_depth = self.emph_depth.saturating_sub(1);
 					return;
 				},
 				_ => {},
@@ -864,6 +888,35 @@ mod tests {
 		assert!(
 			ignored.is_ignored("certificates", &[]),
 			"#emph[..] must be ignored when ignore_emphasis is enabled"
+		);
+	}
+
+	#[test]
+	fn test_emphasis_in_eval_is_ignored_when_enabled() {
+		assert_eq!(EMPH_START, lt_world::EMPH_START);
+		assert_eq!(EMPH_END, lt_world::EMPH_END);
+
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let file = Path::new("example/eval_emph.typ");
+
+		let checked = TestHarness::new(&world, file);
+		assert!(
+			!checked.is_ignored("feeelstavad", &[]),
+			"emphasis in eval'ed markup must be checked when ignore_emphasis is disabled"
+		);
+		assert!(
+			!checked.is_ignored("felstavt", &[]),
+			"eval'ed text outside emphasis must always be checked"
+		);
+
+		let ignored = TestHarness::new_with_options(&world, file, None, true);
+		assert!(
+			ignored.is_ignored("feeelstavad", &[]),
+			"emphasis in eval'ed markup must be ignored when ignore_emphasis is enabled"
+		);
+		assert!(
+			!ignored.is_ignored("felstavt", &[]),
+			"eval'ed text outside emphasis must still be checked"
 		);
 	}
 

@@ -99,6 +99,27 @@ fn raw_text_line_rule(
 	Ok(elem.body.clone())
 }
 
+/// Sentinels around an emphasized body, recognized by the converter.
+///
+/// Emphasis is realized to its body, so the converter cannot see the element.
+/// Unlike the `Emph` syntax node, these markers also cover emphasis created
+/// dynamically (e.g. via `eval`), where the source has no `Emph` node.
+pub const EMPH_START: &str = "\u{e003}";
+/// See [`EMPH_START`].
+pub const EMPH_END: &str = "\u{e004}";
+
+/// Marks an emphasized body with [`EMPH_START`] and [`EMPH_END`].
+///
+/// Like [`footnote_rule`], this keeps paragraph grouping intact, which the
+/// element would otherwise interrupt.
+fn emph_rule(elem: &Packed<EmphElem>, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+	Ok(Content::sequence([
+		TextElem::packed(EMPH_START).spanned(elem.span()),
+		elem.body.clone(),
+		TextElem::packed(EMPH_END).spanned(elem.span()),
+	]))
+}
+
 /// Sentinels around a footnote body, recognized by the converter.
 ///
 /// The converter captures the text between them as a separate chunk so a
@@ -197,7 +218,6 @@ macro_rules! block_rules {
 // containers that the converter does not descend into itself.
 body_rules! {
 	strong_rule: StrongElem,
-	emph_rule: EmphElem,
 	link_rule: LinkElem,
 	quote_rule: QuoteElem,
 	underline_rule: UnderlineElem,
@@ -409,6 +429,7 @@ impl LtWorld {
 			library.rules.register(Target::Paged, citation_rule);
 			library.rules.register(Target::Paged, equation_rule);
 			library.rules.register(Target::Paged, footnote_rule);
+			library.rules.register(Target::Paged, emph_rule);
 			if ignore_raw {
 				library.rules.register(Target::Paged, raw_rule);
 				library.rules.register(Target::Paged, raw_line_rule);
