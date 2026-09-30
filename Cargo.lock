@@ -407,6 +407,7 @@ dependencies = [
  "lt-world",
  "notify",
  "serde_json",
+ "siphasher",
  "tokio",
  "typst",
  "typst-languagetool",

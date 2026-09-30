@@ -70,6 +70,14 @@ Spellcheck typst files with LanguageTool.
 		- are printed with their source location
 		- `check` exits with a non-zero status, `watch` keeps watching
 		- text that could still be realized is checked anyway
+	- Output format
+		- `--format=pretty` (default), `--format=plain` (same as `--plain`)
+		- `--format=code-climate` writes a Code Climate report for GitLab code quality, only with `check`
+			- `--output=<file>` writes it to a file instead of stdout
+			- one issue per result, described as `Typst-LT: <rule> | <sentence with »match«> | <suggestions>`
+			- the sentence is the checked text, so text from variables and data files can be searched for
+			- compile errors are issues with the check `typst/compile-error`
+			- results only count as a failure when the document does not compile
 - vs-codium/vs-code
 	- install language server protocol (LSP)
 		- `cargo install --git=https://github.com/antonWetzel/typst-languagetool lsp --features=...`

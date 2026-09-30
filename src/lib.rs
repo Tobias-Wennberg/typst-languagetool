@@ -9,7 +9,7 @@ use std::{
 
 #[allow(unused_imports)]
 pub use backends::*;
-use convert::{Mapping, context_excerpt, utf16_to_byte};
+use convert::{Mapping, context_excerpt, sentence_excerpt, utf16_to_byte};
 use typst::{
 	World,
 	syntax::{FileId, Source},
@@ -150,6 +150,8 @@ impl FileCollector {
 				return None;
 			}
 			let context = dynamic_context(world, suggestion, text, &locations);
+			let (sentence, sentence_match) =
+				sentence_excerpt(text, suggestion.start, suggestion.end).unwrap_or_default();
 			let dia = Diagnostic {
 				locations,
 				message: suggestion.message.clone(),
@@ -157,10 +159,18 @@ impl FileCollector {
 				rule_description: suggestion.rule_description.clone(),
 				rule_id: suggestion.rule_id.clone(),
 				context,
+				sentence,
+				sentence_match,
 			};
 			Some(dia)
 		});
 		self.diagnostics.extend(diagnostics)
+	}
+
+	/// The diagnostics added since the last call, for printing them as they
+	/// come.
+	pub fn take(&mut self) -> Vec<Diagnostic> {
+		std::mem::take(&mut self.diagnostics)
 	}
 
 	pub fn finish(self) -> Vec<Diagnostic> {
@@ -196,7 +206,22 @@ pub struct Diagnostic {
 	pub replacements: Vec<String>,
 	pub rule_description: String,
 	pub rule_id: String,
+	/// Checked text around the match, only when the match is not in the
+	/// source at its location (text from variables, `eval`, data files).
 	pub context: Option<String>,
+	/// Checked text of the sentence around the match, always set.
+	pub sentence: String,
+	/// Byte range of the match in `sentence`.
+	pub sentence_match: Range<usize>,
+}
+
+impl Diagnostic {
+	/// The checked text LanguageTool matched.
+	pub fn matched(&self) -> &str {
+		self.sentence
+			.get(self.sentence_match.clone())
+			.unwrap_or_default()
+	}
 }
 
 #[derive(Debug, Clone)]

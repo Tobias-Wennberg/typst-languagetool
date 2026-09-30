@@ -33,6 +33,16 @@ enum Task {
 	Watch,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum Format {
+	/// Annotated source snippets.
+	Pretty,
+	/// One line per result, for easy regex evaluation.
+	Plain,
+	/// A Code Climate report, as GitLab reads it for code quality.
+	CodeClimate,
+}
+
 /// Check a typst document with language tool.
 ///
 /// If backends are not listed, the required build features are not enabled.
@@ -61,9 +71,18 @@ struct CliArgs {
 	#[clap(long, default_value_t = 1000)]
 	chunk_size: usize,
 
+	/// Output format. `code-climate` is only supported with `check`.
+	#[clap(long, value_enum, default_value_t = Format::Pretty)]
+	format: Format,
+
 	/// Print results without annotations for easy regex evaluation.
-	#[clap(long, default_value_t = false)]
+	/// Same as `--format=plain`.
+	#[clap(long, default_value_t = false, conflicts_with = "format")]
 	plain: bool,
+
+	/// File to write the `code-climate` report to, instead of stdout.
+	#[clap(short, long, default_value = None)]
+	output: Option<PathBuf>,
 
 	/// Use bundled languagetool jar.
 	#[cfg_attr(not(feature = "bundle"), clap(skip))]
@@ -102,7 +121,8 @@ struct Args {
 	task: Task,
 	path: Option<PathBuf>,
 	delay: f64,
-	plain: bool,
+	format: Format,
+	output: Option<PathBuf>,
 	default_language: Option<(Lang, Option<Region>)>,
 	ignore_raw: bool,
 	ignore_emphasis: bool,
@@ -112,6 +132,22 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	let cli_args = CliArgs::parse();
+
+	let format = if cli_args.plain {
+		Format::Plain
+	} else {
+		cli_args.format
+	};
+	if format == Format::CodeClimate && matches!(cli_args.task, Task::Watch) {
+		Err(anyhow::anyhow!(
+			"`--format=code-climate` is only supported with `check`"
+		))?
+	}
+	if cli_args.output.is_some() && format != Format::CodeClimate {
+		Err(anyhow::anyhow!(
+			"`--output` is only supported with `--format=code-climate`"
+		))?
+	}
 
 	let backend = match (
 		cli_args.bundle,
@@ -148,7 +184,8 @@ async fn main() -> anyhow::Result<()> {
 		task: cli_args.task,
 		path: cli_args.path,
 		delay: cli_args.delay,
-		plain: cli_args.plain,
+		format,
+		output: cli_args.output,
 		default_language: None,
 		ignore_raw: true,
 		ignore_emphasis: false,
@@ -194,6 +231,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn check(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Result<()> {
+	let mut report = output::CodeClimate::default();
 	let success = handle_file(
 		args.path
 			.as_ref()
@@ -202,11 +240,14 @@ async fn check(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Resu
 		&mut lt,
 		&args,
 		&world,
-		args.lt.chunk_size,
 		&mut Cache::new(),
 		args.path.is_none(),
+		&mut report,
 	)
 	.await?;
+	if args.format == Format::CodeClimate {
+		report.write(args.output.as_deref())?;
+	}
 	if !success {
 		std::process::exit(1);
 	}
@@ -266,9 +307,10 @@ async fn watch(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Resu
 						&mut lt,
 						&args,
 						&world,
-						args.lt.chunk_size,
 						&mut cache,
 						false,
+						// Never written: `watch` has no `code-climate` format.
+						&mut output::CodeClimate::default(),
 					)
 					.await?;
 				}
@@ -284,30 +326,32 @@ async fn handle_file(
 	lt: &mut LanguageTool,
 	args: &Args,
 	world: &LtWorld,
-	chunk_size: usize,
 	cache: &mut Cache,
 	include_all: bool,
+	report: &mut output::CodeClimate,
 ) -> anyhow::Result<bool> {
 	let main = args.lt.main.clone().unwrap_or(path.to_owned());
 	let Some(world) = world.with_main(main.clone()) else {
-		if args.plain {
-			println!("error file not found: {}", main.display());
-		} else {
-			println!("{} file not found: {}", "error:".red().bold(), main.display());
-		}
+		file_not_found(args.format, &main);
 		return Ok(false);
 	};
 
 	let compiled = world.compile();
 	let success = compiled.errors.is_empty();
-	if !success && !args.plain {
+	if !success && args.format == Format::Pretty {
 		println!("{}", "Failed to compile document!\n".red().bold());
 	}
 	for diagnostic in &compiled.errors {
-		if args.plain {
-			output::compile_plain(&world, diagnostic);
-		} else {
-			output::compile_pretty(&world, diagnostic);
+		match args.format {
+			Format::Pretty => output::compile_pretty(&world, diagnostic),
+			Format::Plain => output::compile_plain(&world, diagnostic),
+			Format::CodeClimate => {
+				let fallback = world
+					.file_id(&main)
+					.map(|id| id.vpath().get_without_slash().to_string())
+					.unwrap_or_else(|| main.display().to_string());
+				report.compile_error(&world, diagnostic, &fallback);
+			},
 		}
 	}
 	let Some(doc) = compiled.content else {
@@ -315,23 +359,24 @@ async fn handle_file(
 	};
 
 	let Some(file_id) = world.file_id(path) else {
-		if args.plain {
-			println!("error file not found: {}", path.display());
-		} else {
-			println!("{} file not found: {}", "error:".red().bold(), path.display());
-		}
+		file_not_found(args.format, path);
 		return Ok(false);
 	};
 	let file_id_opt = include_all.not().then_some(file_id);
 
 	let paragraphs = typst_languagetool::convert::content(
 		&doc,
-		chunk_size,
+		args.lt.chunk_size,
 		file_id_opt,
 		args.default_language,
 	);
 	let mut collector = typst_languagetool::FileCollector::new(file_id_opt, &world);
 	let mut next_cache = Cache::new();
+	match args.format {
+		Format::Pretty => pretty_start(),
+		Format::Plain => plain_start(),
+		Format::CodeClimate => {},
+	}
 	for (text, mapping) in paragraphs {
 		let lang = mapping.language();
 		let suggestions = if let Some(suggestions) = cache.get(&text, &lang) {
@@ -349,47 +394,42 @@ async fn handle_file(
 			args.ignore_emphasis,
 		);
 		next_cache.insert(text, lang, suggestions);
+
+		// Printed as each chunk comes back, not after the whole document.
+		for diagnostic in collector.take() {
+			let id = if include_all {
+				diagnostic.locations[0].0
+			} else {
+				file_id
+			};
+			let source = world.source(id).unwrap();
+			let path = id.vpath().get_without_slash();
+			match args.format {
+				Format::Pretty => output::pretty(path, &source, diagnostic),
+				Format::Plain => output::plain(path, &source, diagnostic),
+				Format::CodeClimate => report.diagnostic(path, &source, diagnostic),
+			}
+		}
 	}
 	*cache = next_cache;
 
-	let diagnostics = collector.finish();
-
-	if include_all {
-		if args.plain {
-			plain_start();
-			for diagnostic in diagnostics {
-				let id = diagnostic.locations[0].0;
-				let source = world.source(id).unwrap();
-				let path = id.vpath().get_without_slash();
-				output::plain(path, &source, diagnostic);
-			}
-			plain_end();
-		} else {
-			pretty_start();
-			for diagnostic in diagnostics {
-				let id = diagnostic.locations[0].0;
-				let source = world.source(id).unwrap();
-				let path = id.vpath().get_without_slash();
-				output::pretty(path, &source, diagnostic);
-			}
-		}
-	} else {
-		let path = file_id.vpath().get_without_slash();
-		let source = world.source(file_id).unwrap();
-		if args.plain {
-			plain_start();
-			for diagnostic in diagnostics {
-				output::plain(path, &source, diagnostic);
-			}
-			plain_end();
-		} else {
-			pretty_start();
-			for diagnostic in diagnostics {
-				output::pretty(path, &source, diagnostic);
-			}
-		}
+	if args.format == Format::Plain {
+		plain_end();
 	}
 	Ok(success)
+}
+
+/// On stderr for `code-climate`, whose report may be on stdout.
+fn file_not_found(format: Format, path: &Path) {
+	match format {
+		Format::Pretty => println!(
+			"{} file not found: {}",
+			"error:".red().bold(),
+			path.display()
+		),
+		Format::Plain => println!("error file not found: {}", path.display()),
+		Format::CodeClimate => eprintln!("error: file not found: {}", path.display()),
+	}
 }
 
 fn plain_start() {

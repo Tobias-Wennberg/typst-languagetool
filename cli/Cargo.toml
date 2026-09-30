@@ -28,3 +28,4 @@ tokio.workspace = true
 lt-world.workspace = true
 typst.workspace = true
 colored.workspace = true
+siphasher.workspace = true

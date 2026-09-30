@@ -173,6 +173,16 @@ fn ceil_char_boundary(text: &str, mut byte: usize) -> usize {
 }
 
 pub(crate) fn context_excerpt(text: &str, start: usize, end: usize) -> Option<String> {
+	sentence_excerpt(text, start, end).map(|(excerpt, _)| excerpt)
+}
+
+/// The sentence around the UTF-16 range `start..end` of `text`, with runs of
+/// whitespace collapsed, and the byte range of the match within it.
+pub(crate) fn sentence_excerpt(
+	text: &str,
+	start: usize,
+	end: usize,
+) -> Option<(String, Range<usize>)> {
 	let start_byte = utf16_to_byte(text, start)?;
 	let end_byte = utf16_to_byte(text, end)?;
 	if start_byte > end_byte {
@@ -196,7 +206,8 @@ pub(crate) fn context_excerpt(text: &str, start: usize, end: usize) -> Option<St
 			center.saturating_sub(CONTEXT_MAX / 2).max(sentence_start),
 		);
 		let end = floor_char_boundary(text, (start + CONTEXT_MAX).min(sentence_end));
-		(start, end.max(start))
+		// A match longer than the window is kept whole.
+		(start.min(start_byte), end.max(start).max(end_byte))
 	} else {
 		(sentence_start, sentence_end)
 	};
@@ -205,12 +216,32 @@ pub(crate) fn context_excerpt(text: &str, start: usize, end: usize) -> Option<St
 	if excerpt_start > sentence_start {
 		excerpt.push('…');
 	}
-	excerpt.extend(text[excerpt_start..excerpt_end].chars());
+	push_collapsed(&mut excerpt, &text[excerpt_start..start_byte]);
+	let match_start = excerpt.len();
+	push_collapsed(&mut excerpt, &text[start_byte..end_byte]);
+	let match_end = excerpt.len();
+	push_collapsed(&mut excerpt, &text[end_byte..excerpt_end]);
 	if excerpt_end < sentence_end {
 		excerpt.push('…');
 	}
 
-	Some(excerpt.split_whitespace().collect::<Vec<_>>().join(" "))
+	excerpt.truncate(excerpt.trim_end().len());
+	let match_end = match_end.min(excerpt.len());
+	Some((excerpt, match_start.min(match_end)..match_end))
+}
+
+/// Append `text`, with each run of whitespace as one space and none at the
+/// start of `out`.
+fn push_collapsed(out: &mut String, text: &str) {
+	for c in text.chars() {
+		if c.is_whitespace() {
+			if out.is_empty().not() && out.ends_with(' ').not() {
+				out.push(' ');
+			}
+		} else {
+			out.push(c);
+		}
+	}
 }
 
 pub fn content(
@@ -1099,6 +1130,34 @@ mod tests {
 	}
 
 	#[test]
+	fn test_sentence_excerpt_match_range() {
+		let text = "First.\n  Här  är ett  felstavatt\tord. Last.";
+		let start = text[..text.find("felstavatt").unwrap()]
+			.encode_utf16()
+			.count();
+		let end = start + "felstavatt".encode_utf16().count();
+		let (excerpt, range) = sentence_excerpt(text, start, end).unwrap();
+		assert_eq!(excerpt, "Här är ett felstavatt ord.");
+		assert_eq!(&excerpt[range], "felstavatt");
+	}
+
+	#[test]
+	fn test_sentence_excerpt_truncated_match_range() {
+		let padding = "ord ".repeat(100);
+		let text = format!("{padding}felstavatt {padding}");
+		let start = text[..text.find("felstavatt").unwrap()]
+			.encode_utf16()
+			.count();
+		let end = start + "felstavatt".encode_utf16().count();
+		let (excerpt, range) = sentence_excerpt(&text, start, end).unwrap();
+		assert!(
+			excerpt.starts_with('…') && excerpt.ends_with('…'),
+			"{excerpt:?}"
+		);
+		assert_eq!(&excerpt[range], "felstavatt");
+	}
+
+	#[test]
 	fn test_context_excerpt_invalid_offsets() {
 		assert_eq!(context_excerpt("abc", 1, 5), None);
 		assert_eq!(context_excerpt("😀", 1, 2), None);
@@ -1137,5 +1196,16 @@ mod tests {
 		assert_eq!(diagnostics.len(), 1);
 		let context = diagnostics[0].context.as_deref().unwrap();
 		assert!(context.contains("felstavat"), "{context:?}");
+		assert_eq!(diagnostics[0].matched(), "felstavat");
+		assert!(diagnostics[0].sentence.contains("felstavat"));
+	}
+
+	#[test]
+	fn test_sentence_for_source_text() {
+		let world = lt_world::LtWorld::new("example".into(), true);
+		let harness = TestHarness::new(&world, Path::new("example/inline.typ"));
+
+		let diagnostics = add_diagnostic(&harness, "Testlicensen");
+		assert_eq!(diagnostics[0].matched(), "Testlicensen");
 	}
 }
