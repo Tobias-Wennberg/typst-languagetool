@@ -193,9 +193,10 @@ Options are set in the Zed settings under `lsp.typst-languagetool.initialization
 
 ## Releasing
 
-1. bump `version` under `[workspace.package]` in `Cargo.toml`, run `cargo check` to update `Cargo.lock` and commit to `main`
-1. tag the commit with the same version and push the tag
+1. bump `version` under `[workspace.package]` in `Cargo.toml`, run `cargo update --workspace` to update `Cargo.lock` and commit both to `main`
+	- the release build uses `--locked` and fails if `Cargo.lock` still has the old version
+1. tag the commit with the same version and push it together with `main`
 	- `git tag v<version>` (`v` or `V`, e.g. `v1.0.0`)
-	- `git push origin v<version>`
+	- `git push --atomic origin main v<version>`
 1. the release workflow (`.github/workflows/release.yml`) builds the binaries and publishes the release
 	- fails if the tag is not on `main` or does not match the version in `Cargo.toml`
