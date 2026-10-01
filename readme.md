@@ -50,6 +50,10 @@ Spellcheck typst files with LanguageTool.
 
 ## Usage
 
+- prebuilt binaries
+	- download `typst-languagetool-<tag>-x86_64-unknown-linux-gnu.tar.gz` from the GitHub releases
+	- contains `typst-languagetool` (CLI) and `typst-languagetool-lsp` (LSP)
+	- Linux x86_64 with the `server` backend only, other platforms and backends need `cargo install`
 - terminal
 	- install command line interface (CLI)
 		- `cargo install --git=https://github.com/antonWetzel/typst-languagetool cli --features=...`
@@ -186,3 +190,12 @@ Options are set in the Zed settings under `lsp.typst-languagetool.initialization
   }
 }
 ```
+
+## Releasing
+
+1. bump `version` under `[workspace.package]` in `Cargo.toml`, run `cargo check` to update `Cargo.lock` and commit to `main`
+1. tag the commit with the same version and push the tag
+	- `git tag v<version>` (`v` or `V`, e.g. `v1.0.0`)
+	- `git push origin v<version>`
+1. the release workflow (`.github/workflows/release.yml`) builds the binaries and publishes the release
+	- fails if the tag is not on `main` or does not match the version in `Cargo.toml`
