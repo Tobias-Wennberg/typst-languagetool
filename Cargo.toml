@@ -19,8 +19,8 @@ lt-world.workspace = true
 members = [".", "cli", "lsp", "lt-world"]
 
 [workspace.package]
-version = "0.5.1"
-edition = "2024"
+version = "0.5.2"
+edition = "2026"
 
 [features]
 default = ["jar", "server"]
@@ -33,15 +33,15 @@ server = ["dep:languagetool-rust"]
 typst-languagetool = { path = ".", default-features = false }
 lt-world = { path = "./lt-world" }
 
-typst = "0.15.0"
-typst-kit = { version = "0.15.0", features = [
+typst = "0.15.1"
+typst-kit = { version = "0.15.1", features = [
     "embedded-fonts",
     "system-packages",
     "system-downloader",
     "scan-fonts",
     "datetime",
 ] }
-typst-eval = "0.15.0"
+typst-eval = "0.15.1"
 
 annotate-snippets = "0.12.4"
 clap = { version = "4.5.48", features = ["derive"] }
@@ -67,6 +67,3 @@ crossbeam-channel = "0.5.15"
 humantime-serde = "1.1.1"
 percent-encoding = "2.3.2"
 siphasher = "1.0.3"
-# Only for static musl builds: OpenSSL compiled in, faster allocator than musl's
-openssl = { version = "0.10.81", features = ["vendored"] }
-mimalloc = "0.1"
