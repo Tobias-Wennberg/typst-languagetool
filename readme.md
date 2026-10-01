@@ -51,9 +51,9 @@ Spellcheck typst files with LanguageTool.
 ## Usage
 
 - prebuilt binaries
-	- download `typst-languagetool-<tag>-x86_64-unknown-linux-gnu.tar.gz` from the GitHub releases
+	- download `typst-languagetool-<tag>-x86_64-unknown-linux-musl.tar.gz` from the GitHub releases
 	- contains `typst-languagetool` (CLI) and `typst-languagetool-lsp` (LSP)
-	- Linux x86_64 with the `server` backend only, other platforms and backends need `cargo install`
+	- static Linux x86_64 binaries (musl, no system libraries needed) with the `server` backend only, other platforms and backends need `cargo install`
 - terminal
 	- install command line interface (CLI)
 		- `cargo install --git=https://github.com/antonWetzel/typst-languagetool cli --features=...`

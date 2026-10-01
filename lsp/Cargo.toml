@@ -31,3 +31,7 @@ lsp-types.workspace = true
 crossbeam-channel.workspace = true
 humantime-serde.workspace = true
 percent-encoding.workspace = true
+
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl.workspace = true
+mimalloc.workspace = true

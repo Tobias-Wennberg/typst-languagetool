@@ -1,5 +1,9 @@
 mod output;
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 

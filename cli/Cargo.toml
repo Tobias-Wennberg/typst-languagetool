@@ -29,3 +29,7 @@ lt-world.workspace = true
 typst.workspace = true
 colored.workspace = true
 siphasher.workspace = true
+
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl.workspace = true
+mimalloc.workspace = true

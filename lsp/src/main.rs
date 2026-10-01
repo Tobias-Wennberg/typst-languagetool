@@ -19,6 +19,10 @@ use typst_languagetool::{LanguageTool, LanguageToolBackend, LanguageToolOptions,
 #[cfg(not(any(feature = "bundle", feature = "jar", feature = "server")))]
 compile_error!("No backends enabled, the backends can be enabled with feature flags");
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[serde(default)]
 struct InitOptions {
