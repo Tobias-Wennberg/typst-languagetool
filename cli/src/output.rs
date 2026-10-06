@@ -352,14 +352,11 @@ impl CodeClimate {
 		});
 	}
 
-	/// Write the report to `path`, or to stdout. With no issues the report
-	/// is `[]`, never absent.
-	pub fn write(self, path: Option<&Path>) -> anyhow::Result<()> {
+	/// Write the report to `path`. With no issues the report is `[]`, never
+	/// absent.
+	pub fn write(self, path: &Path) -> anyhow::Result<()> {
 		let report = serde_json::to_string_pretty(&self.into_json())?;
-		match path {
-			Some(path) => std::fs::write(path, report + "\n")?,
-			None => println!("{report}"),
-		}
+		std::fs::write(path, report + "\n")?;
 		Ok(())
 	}
 

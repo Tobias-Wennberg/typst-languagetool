@@ -43,14 +43,13 @@ enum Format {
 	Pretty,
 	/// One line per result, for easy regex evaluation.
 	Plain,
-	/// A Code Climate report, as GitLab reads it for code quality.
-	CodeClimate,
 }
 
 /// Check a typst document with language tool.
 ///
 /// If backends are not listed, the required build features are not enabled.
 #[derive(Parser, Debug)]
+#[command(name = "typst-languagetool", version)]
 struct CliArgs {
 	task: Task,
 
@@ -75,7 +74,7 @@ struct CliArgs {
 	#[clap(long, default_value_t = 1000)]
 	chunk_size: usize,
 
-	/// Output format. `code-climate` is only supported with `check`.
+	/// Output format.
 	#[clap(long, value_enum, default_value_t = Format::Pretty)]
 	format: Format,
 
@@ -84,9 +83,10 @@ struct CliArgs {
 	#[clap(long, default_value_t = false, conflicts_with = "format")]
 	plain: bool,
 
-	/// File to write the `code-climate` report to, instead of stdout.
-	#[clap(short, long, default_value = None)]
-	output: Option<PathBuf>,
+	/// Also write a Code Climate report for GitLab code quality to this file
+	/// once the check is done. Only supported with `check`.
+	#[clap(long, default_value = None, id = "FILE")]
+	code_climate: Option<PathBuf>,
 
 	/// Use bundled languagetool jar.
 	#[cfg_attr(not(feature = "bundle"), clap(skip))]
@@ -126,7 +126,7 @@ struct Args {
 	path: Option<PathBuf>,
 	delay: f64,
 	format: Format,
-	output: Option<PathBuf>,
+	code_climate: Option<PathBuf>,
 	default_language: Option<(Lang, Option<Region>)>,
 	ignore_raw: bool,
 	ignore_emphasis: bool,
@@ -142,14 +142,9 @@ async fn main() -> anyhow::Result<()> {
 	} else {
 		cli_args.format
 	};
-	if format == Format::CodeClimate && matches!(cli_args.task, Task::Watch) {
+	if cli_args.code_climate.is_some() && matches!(cli_args.task, Task::Watch) {
 		Err(anyhow::anyhow!(
-			"`--format=code-climate` is only supported with `check`"
-		))?
-	}
-	if cli_args.output.is_some() && format != Format::CodeClimate {
-		Err(anyhow::anyhow!(
-			"`--output` is only supported with `--format=code-climate`"
+			"`--code-climate` is only supported with `check`"
 		))?
 	}
 
@@ -189,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
 		path: cli_args.path,
 		delay: cli_args.delay,
 		format,
-		output: cli_args.output,
+		code_climate: cli_args.code_climate,
 		default_language: None,
 		ignore_raw: true,
 		ignore_emphasis: false,
@@ -235,7 +230,10 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn check(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Result<()> {
-	let mut report = output::CodeClimate::default();
+	let mut report = args
+		.code_climate
+		.is_some()
+		.then(output::CodeClimate::default);
 	let success = handle_file(
 		args.path
 			.as_ref()
@@ -246,11 +244,11 @@ async fn check(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Resu
 		&world,
 		&mut Cache::new(),
 		args.path.is_none(),
-		&mut report,
+		report.as_mut(),
 	)
 	.await?;
-	if args.format == Format::CodeClimate {
-		report.write(args.output.as_deref())?;
+	if let (Some(report), Some(path)) = (report, &args.code_climate) {
+		report.write(path)?;
 	}
 	if !success {
 		std::process::exit(1);
@@ -306,17 +304,7 @@ async fn watch(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Resu
 					if !path.is_file() {
 						continue;
 					}
-					handle_file(
-						&path,
-						&mut lt,
-						&args,
-						&world,
-						&mut cache,
-						false,
-						// Never written: `watch` has no `code-climate` format.
-						&mut output::CodeClimate::default(),
-					)
-					.await?;
+					handle_file(&path, &mut lt, &args, &world, &mut cache, false, None).await?;
 				}
 			},
 			Err(RecvTimeoutError::Disconnected) => break,
@@ -332,7 +320,7 @@ async fn handle_file(
 	world: &LtWorld,
 	cache: &mut Cache,
 	include_all: bool,
-	report: &mut output::CodeClimate,
+	mut report: Option<&mut output::CodeClimate>,
 ) -> anyhow::Result<bool> {
 	let main = args.lt.main.clone().unwrap_or(path.to_owned());
 	let Some(world) = world.with_main(main.clone()) else {
@@ -349,13 +337,13 @@ async fn handle_file(
 		match args.format {
 			Format::Pretty => output::compile_pretty(&world, diagnostic),
 			Format::Plain => output::compile_plain(&world, diagnostic),
-			Format::CodeClimate => {
-				let fallback = world
-					.file_id(&main)
-					.map(|id| id.vpath().get_without_slash().to_string())
-					.unwrap_or_else(|| main.display().to_string());
-				report.compile_error(&world, diagnostic, &fallback);
-			},
+		}
+		if let Some(report) = report.as_deref_mut() {
+			let fallback = world
+				.file_id(&main)
+				.map(|id| id.vpath().get_without_slash().to_string())
+				.unwrap_or_else(|| main.display().to_string());
+			report.compile_error(&world, diagnostic, &fallback);
 		}
 	}
 	let Some(doc) = compiled.content else {
@@ -379,7 +367,6 @@ async fn handle_file(
 	match args.format {
 		Format::Pretty => pretty_start(),
 		Format::Plain => plain_start(),
-		Format::CodeClimate => {},
 	}
 	for (text, mapping) in paragraphs {
 		let lang = mapping.language();
@@ -408,10 +395,12 @@ async fn handle_file(
 			};
 			let source = world.source(id).unwrap();
 			let path = id.vpath().get_without_slash();
+			if let Some(report) = report.as_deref_mut() {
+				report.diagnostic(path, &source, diagnostic.clone());
+			}
 			match args.format {
 				Format::Pretty => output::pretty(path, &source, diagnostic),
 				Format::Plain => output::plain(path, &source, diagnostic),
-				Format::CodeClimate => report.diagnostic(path, &source, diagnostic),
 			}
 		}
 	}
@@ -423,7 +412,6 @@ async fn handle_file(
 	Ok(success)
 }
 
-/// On stderr for `code-climate`, whose report may be on stdout.
 fn file_not_found(format: Format, path: &Path) {
 	match format {
 		Format::Pretty => println!(
@@ -432,7 +420,6 @@ fn file_not_found(format: Format, path: &Path) {
 			path.display()
 		),
 		Format::Plain => println!("error file not found: {}", path.display()),
-		Format::CodeClimate => eprintln!("error: file not found: {}", path.display()),
 	}
 }
 
