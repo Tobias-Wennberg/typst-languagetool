@@ -1,6 +1,7 @@
 use std::{
 	collections::{HashMap, hash_map::Entry},
 	ops::Not,
+	sync::Mutex,
 };
 
 use jni::{
@@ -14,7 +15,7 @@ use crate::{LanguageToolBackend, Suggestion};
 #[derive(Debug)]
 pub struct LanguageToolJNI {
 	jvm: JavaVM,
-	data: Data,
+	data: Mutex<Data>,
 }
 
 macro_rules! jni_for {
@@ -44,7 +45,7 @@ impl LanguageToolJNI {
 		let jvm = new_jvm(class_path)?;
 		Ok(Self {
 			jvm,
-			data: Data { languages: HashMap::new() },
+			data: Mutex::new(Data { languages: HashMap::new() }),
 		})
 	}
 
@@ -55,25 +56,29 @@ impl LanguageToolJNI {
 		let jvm = new_jvm(path)?;
 		Ok(Self {
 			jvm,
-			data: Data { languages: HashMap::new() },
+			data: Mutex::new(Data { languages: HashMap::new() }),
 		})
 	}
 }
 
 impl LanguageToolBackend for LanguageToolJNI {
-	async fn check_text(&mut self, lang: String, text: &str) -> anyhow::Result<Vec<Suggestion>> {
+	async fn check_text(&self, lang: String, text: &str) -> anyhow::Result<Vec<Suggestion>> {
 		self.jvm
-			.attach_current_thread(|env| self.data.check_text(env, lang, text))
+			.attach_current_thread(|env| self.data.lock().unwrap().check_text(env, lang, text))
 	}
 
 	async fn allow_words(&mut self, lang: String, words: &[String]) -> anyhow::Result<()> {
 		self.jvm
-			.attach_current_thread(|env| self.data.allow_words(env, lang, words))
+			.attach_current_thread(|env| self.data.get_mut().unwrap().allow_words(env, lang, words))
 	}
 
 	async fn disable_checks(&mut self, lang: String, checks: &[String]) -> anyhow::Result<()> {
-		self.jvm
-			.attach_current_thread(|env| self.data.disable_checks(env, lang, checks))
+		self.jvm.attach_current_thread(|env| {
+			self.data
+				.get_mut()
+				.unwrap()
+				.disable_checks(env, lang, checks)
+		})
 	}
 }
 

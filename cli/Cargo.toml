@@ -25,6 +25,7 @@ annotate-snippets.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
+futures-util.workspace = true
 lt-world.workspace = true
 typst.workspace = true
 colored.workspace = true

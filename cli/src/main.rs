@@ -8,6 +8,7 @@ use anyhow::Context;
 use clap::{Parser, ValueEnum};
 
 use colored::Colorize;
+use futures_util::{StreamExt, stream};
 use lt_world::LtWorld;
 use notify::event::{EventKind, ModifyKind};
 use notify::{RecursiveMode, Watcher};
@@ -30,6 +31,11 @@ use std::{
 
 #[cfg(not(any(feature = "bundle", feature = "jar", feature = "server")))]
 compile_error!("No backends enabled, the backends can be enabled with feature flags");
+
+// Chunks checked at once. Measured 2026-10-07 on lia-ansible's handbook
+// (440 chunks) against the vmint cluster's server: 4 took a quarter of the
+// time of one at a time, 8 hardly less than 4.
+const CONCURRENT_CHECKS: usize = 4;
 
 #[derive(ValueEnum, Clone, Debug)]
 enum Task {
@@ -229,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
 	Ok(())
 }
 
-async fn check(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Result<()> {
+async fn check(args: Args, lt: LanguageTool, world: LtWorld) -> anyhow::Result<()> {
 	let mut report = args
 		.code_climate
 		.is_some()
@@ -239,7 +245,7 @@ async fn check(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Resu
 			.as_ref()
 			.or(args.lt.main.as_ref())
 			.context("No path or main specified")?,
-		&mut lt,
+		&lt,
 		&args,
 		&world,
 		&mut Cache::new(),
@@ -256,7 +262,7 @@ async fn check(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Resu
 	Ok(())
 }
 
-async fn watch(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Result<()> {
+async fn watch(args: Args, lt: LanguageTool, world: LtWorld) -> anyhow::Result<()> {
 	let (tx, rx) = channel();
 	let mut watcher = notify::recommended_watcher(move |event| {
 		let _ = tx.send(event);
@@ -304,7 +310,7 @@ async fn watch(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Resu
 					if !path.is_file() {
 						continue;
 					}
-					handle_file(&path, &mut lt, &args, &world, &mut cache, false, None).await?;
+					handle_file(&path, &lt, &args, &world, &mut cache, false, None).await?;
 				}
 			},
 			Err(RecvTimeoutError::Disconnected) => break,
@@ -315,7 +321,7 @@ async fn watch(args: Args, mut lt: LanguageTool, world: LtWorld) -> anyhow::Resu
 
 async fn handle_file(
 	path: &Path,
-	lt: &mut LanguageTool,
+	lt: &LanguageTool,
 	args: &Args,
 	world: &LtWorld,
 	cache: &mut Cache,
@@ -368,13 +374,21 @@ async fn handle_file(
 		Format::Pretty => pretty_start(),
 		Format::Plain => plain_start(),
 	}
-	for (text, mapping) in paragraphs {
+	let checks = paragraphs.into_iter().map(|(text, mapping)| {
 		let lang = mapping.language();
-		let suggestions = if let Some(suggestions) = cache.get(&text, &lang) {
-			suggestions
-		} else {
-			lt.check_text(lang.clone(), &text).await?
-		};
+		let cached = cache.get(&text, &lang);
+		async move {
+			let suggestions = match cached {
+				Some(suggestions) => suggestions,
+				None => lt.check_text(lang.clone(), &text).await?,
+			};
+			anyhow::Ok((text, mapping, lang, suggestions))
+		}
+	});
+	// In document order, so output and report read as with one at a time.
+	let mut checks = stream::iter(checks).buffered(CONCURRENT_CHECKS);
+	while let Some(checked) = checks.next().await {
+		let (text, mapping, lang, suggestions) = checked?;
 
 		collector.add(
 			&world,
@@ -404,6 +418,7 @@ async fn handle_file(
 			}
 		}
 	}
+	drop(checks);
 	*cache = next_cache;
 
 	if args.format == Format::Plain {

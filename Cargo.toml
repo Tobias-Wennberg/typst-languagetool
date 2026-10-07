@@ -52,6 +52,9 @@ jni = { version = "0.22.4", features = ["invocation"] }
 serde_ignored = "0.1.10"
 anyhow = "1.0.100"
 languagetool-rust = "3.0.0"
+futures-util = { version = "0.3.32", default-features = false, features = [
+    "std",
+] }
 tokio = { version = "1.47.1", features = [
     "rt",
     "macros",

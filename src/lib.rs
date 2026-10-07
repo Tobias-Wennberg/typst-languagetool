@@ -20,7 +20,7 @@ use typst::{
 pub trait LanguageToolBackend {
 	async fn allow_words(&mut self, lang: String, words: &[String]) -> anyhow::Result<()>;
 	async fn disable_checks(&mut self, lang: String, checks: &[String]) -> anyhow::Result<()>;
-	async fn check_text(&mut self, lang: String, text: &str) -> anyhow::Result<Vec<Suggestion>>;
+	async fn check_text(&self, lang: String, text: &str) -> anyhow::Result<Vec<Suggestion>>;
 }
 
 #[derive(Debug)]
@@ -105,7 +105,7 @@ impl LanguageToolBackend for LanguageTool {
 			_ => unreachable!("{:?} {:?}", lang, checks),
 		}
 	}
-	async fn check_text(&mut self, lang: String, text: &str) -> anyhow::Result<Vec<Suggestion>> {
+	async fn check_text(&self, lang: String, text: &str) -> anyhow::Result<Vec<Suggestion>> {
 		match self {
 			#[cfg(any(feature = "bundle", feature = "jar"))]
 			Self::JNI(lt) => lt.check_text(lang, text).await,
