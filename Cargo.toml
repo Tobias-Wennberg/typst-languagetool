@@ -19,7 +19,7 @@ lt-world.workspace = true
 members = [".", "cli", "lsp", "lt-world"]
 
 [workspace.package]
-version = "0.5.3"
+version = "0.6.0"
 edition = "2024"
 
 [features]
